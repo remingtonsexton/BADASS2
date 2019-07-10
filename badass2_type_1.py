@@ -8,11 +8,11 @@ from matplotlib import cm
 import matplotlib.gridspec as gridspec
 from scipy import optimize, linalg, special, fftpack
 from scipy.interpolate import griddata, interp1d
-from scipy.stats import kde
+from scipy.stats import kde, norm
 from scipy.integrate import simps
 from astropy.io import fits
 import glob
-from time import clock
+import time
 from os import path
 import os
 import shutil
@@ -26,9 +26,40 @@ import astropy.units as u
 from astropy import coordinates
 from astropy.cosmology import FlatLambdaCDM
 import re
+import natsort
+plt.style.use('dark_background')
+import matplotlib
+matplotlib.rcParams['agg.path.chunksize'] = 100000
+
+
+#### Find Nearest Function #######################################################
+
+def find_nearest(array, value):
+    array = np.asarray(array)
+    idx = (np.abs(array - value)).argmin()
+    return array[idx],idx
 
 ##################################################################################
-# Prepare SDSS spectrum for pPXF
+
+
+#### Convert Seconds to Minutes ##################################################
+
+# Python Program to Convert seconds 
+# into hours, minutes and seconds 
+  
+def time_convert(seconds): 
+    seconds = seconds % (24. * 3600.) 
+    hour = seconds // 3600.
+    seconds %= 3600.
+    minutes = seconds // 60.
+    seconds %= 60.
+      
+    return "%d:%02d:%02d" % (hour, minutes, seconds)
+
+##################################################################################
+
+
+#### Setup Directory Structure ###################################################
 
 def setup_dirs(work_dir):
 
@@ -78,169 +109,110 @@ def setup_dirs(work_dir):
 
     return run_dir,prev_dir
 
-def sdss_prepare(file,fitreg,temp_dir,run_dir):
-    """
-    Prepare an SDSS spectrum for pPXF, returning all necessary 
-    parameters. 
-    
-    file: fully-specified path of the spectrum 
-    z: the redshift; we use the SDSS-measured redshift
-    fitreg: (min,max); tuple specifying the minimum and maximum 
-            wavelength bounds of the region to be fit. 
-    
-    """
-    # Load the data
-    hdu = fits.open(file)
+##################################################################################
 
-    specobj = hdu[2].data
-    z = specobj['z'][0]
-    ra = specobj['PLUG_RA'][0]
-    dec = specobj['PLUG_DEC'][0]
 
-    t = hdu['COADD'].data
-    
-    # Only use the wavelength range in common between galaxy and stellar library.
-    # Determine limits of spectrum vs templates
-    # mask = ( (t['loglam'] > np.log10(3540)) & (t['loglam'] < np.log10(7409)) )
-    fit_min,fit_max = float(fitreg[0]),float(fitreg[1])
-    mask = ( (t['loglam'] > np.log10(fit_min*(1+z))) & (t['loglam'] < np.log10(fit_max*(1+z))) )
-    
-    # Unpack the spectra
-    flux = t['flux'][mask]
-    galaxy = flux  
-    # SDSS spectra are already log10-rebinned
-    loglam_gal = t['loglam'][mask] # This is the observed SDSS wavelength range, NOT the rest wavelength range of the galaxy
-    lam_gal = 10**loglam_gal
-    ivar = t['ivar'][mask]# inverse variance
-    noise = np.sqrt(1.0/ivar)
+#### Determine fitting region ####################################################
 
-    c = 299792.458                  # speed of light in km/s
-    frac = lam_gal[1]/lam_gal[0]    # Constant lambda fraction per pixel
-    dlam_gal = (frac - 1)*lam_gal   # Size of every pixel in Angstrom
-    # print('\n Size of every pixel: %s (A)' % dlam_gal)
-    wdisp = t['wdisp'][mask]        # Intrinsic dispersion of every pixel, in pixels units
-    fwhm_gal = 2.355*wdisp*dlam_gal # Resolution FWHM of every pixel, in Angstroms
-    velscale = np.log(frac)*c       # Constant velocity scale in km/s per pixel
-    
-    # If the galaxy is at significant redshift, one should bring the galaxy
-    # spectrum roughly to the rest-frame wavelength, before calling pPXF
-    # (See Sec2.4 of Cappellari 2017). In practice there is no
-    # need to modify the spectrum in any way, given that a red shift
-    # corresponds to a linear shift of the log-rebinned spectrum.
-    # One just needs to compute the wavelength range in the rest-frame
-    # and adjust the instrumental resolution of the galaxy observations.
-    # This is done with the following three commented lines:
-    #
-    lam_gal = lam_gal/(1+z)  # Compute approximate restframe wavelength
-    fwhm_gal = fwhm_gal/(1+z)   # Adjust resolution in Angstrom
+def determine_upper_bound(first_good,last_good):
+	# Set some rules for the upper spectrum limit
+	# Indo-US Library of Stellar Templates has a upper limit of 9464
+	if ((last_good>=7000.) & (last_good<=9464.)) and (last_good-first_good>=500.): # cap at 7000 A
+		auto_upp = last_good #7000.
+	elif ((last_good>=6750.) & (last_good<=7000.)) and (last_good-first_good>=500.): # include Ha/[NII]/[SII] region
+		auto_upp = last_good
+	elif ((last_good>=6400.) & (last_good<=6750.)) and (last_good-first_good>=500.): # omit H-alpha/[NII] region if we can't fit all lines in region
+		auto_upp = 6400.
+	elif ((last_good>=5050.) & (last_good<=6400.)) and (last_good-first_good>=500.): # Full MgIb/FeII region
+		auto_upp = last_good
+	elif ((last_good>=4750.) & (last_good<=5025.)) and (last_good-first_good>=500.): # omit H-beta/[OIII] region if we can't fit all lines in region
+		auto_upp = 4750.
+	elif ((last_good>=4400.) & (last_good<=4750.)) and (last_good-first_good>=500.):
+		auto_upp = last_good
+	elif ((last_good>=4300.) & (last_good<=4400.)) and (last_good-first_good>=500.): # omit H-gamma region if we can't fit all lines in region
+		auto_upp = 4300.
+	elif ((last_good>=3500.) & (last_good<=4300.)) and (last_good-first_good>=500.): # omit H-gamma region if we can't fit all lines in region
+		auto_upp = last_good
+	elif (last_good-first_good>=500.):
+		print('\n Not enough spectrum to fit! ')
+		auto_upp = None 
+	return auto_upp
 
-    # Read the list of filenames from the Single Stellar Population library
-    # by Vazdekis (2010, MNRAS, 404, 1639) http://miles.iac.es/. A subset
-    # of the library is included for this example with permission
-    # num_temp = 10 # number of templates
-    # vazdekis = glob.glob(temp_dir + '/Mun1.30Z*.fits')#[:num_temp]
-    vazdekis = glob.glob(temp_dir + '/*.fits')#[:num_temp]
 
-    vazdekis.sort() # Sort them in the order they appear in the directory
-    # fwhm_tem = 2.51 # Vazdekis+10 spectra have a constant resolution FWHM of 2.51A.
-    fwhm_tem = 1.35 # Indo-US Template Library FWHM
+def determine_fit_reg(file,good_thresh,run_dir,fit_reg='auto'):
+	# Open spectrum file
+	hdu = fits.open(file)
+	specobj = hdu[2].data
+	z = specobj['z'][0]
+	t = hdu['COADD'].data
+	lam_gal = (10**(t['loglam']))/(1+z)
 
-    # Extract the wavelength range and logarithmically rebin one spectrum
-    # to the same velocity scale of the SDSS galaxy spectrum, to determine
-    # the size needed for the array which will contain the template spectra.
-    #
-    hdu = fits.open(vazdekis[0])
-    ssp = hdu[0].data
-    h2 = hdu[0].header
-    lam_temp = np.array(h2['CRVAL1'] + h2['CDELT1']*np.arange(h2['NAXIS1']))
-    # By cropping the templates we save some fitting time
-    mask_temp = ( (lam_temp > (fit_min-200.)) & (lam_temp < (fit_max+200.)) )
-    ssp = ssp[mask_temp]
-    lam_temp = lam_temp[mask_temp]
+	#mask = ((lam_gal > 4230.) & (lam_gal < 5150.))
 
-    lamRange_temp = [np.min(lam_temp), np.max(lam_temp)]
-    sspNew = log_rebin(lamRange_temp, ssp, velscale=velscale)[0]
-    templates = np.empty((sspNew.size, len(vazdekis)))
-    
-    # Interpolates the galaxy spectral resolution at the location of every pixel
-    # of the templates. Outside the range of the galaxy spectrum the resolution
-    # will be extrapolated, but this is irrelevant as those pixels cannot be
-    # used in the fit anyway.
-    fwhm_gal = np.interp(lam_temp, lam_gal, fwhm_gal)
+	#lam_gal = lam_gal#[mask]
+	gal  = t['flux']#[mask]
+	ivar = t['ivar']#[mask]
+	and_mask = t['and_mask']#[mask]
+	# Edges of wavelength vector
+	first_good = lam_gal[0]
+	last_good  = lam_gal[-1]
+	# print first_good,last_good
 
-    # Convolve the whole Vazdekis library of spectral templates
-    # with the quadratic difference between the SDSS and the
-    # Vazdekis instrumental resolution. Logarithmically rebin
-    # and store each template as a column in the array TEMPLATES.
-    
-    # Quadratic sigma difference in pixels Vazdekis --> SDSS
-    # The formula below is rigorously valid if the shapes of the
-    # instrumental spectral profiles are well approximated by Gaussians.
-    #
-    # In the line below, the fwhm_dif is set to zero when fwhm_gal < fwhm_tem.
-    # In principle it should never happen and a higher resolution template should be used.
-    #
-    fwhm_dif = np.sqrt((fwhm_gal**2 - fwhm_tem**2).clip(0))
-    sigma = fwhm_dif/2.355/h2['CDELT1'] # Sigma difference in pixels
+	if ((fit_reg=='auto') or (fit_reg is None) or (fit_reg=='full')):
+		# The lower limit of the spectrum must be the lower limit of our stellar templates
+		auto_low = np.max([3500.,first_good]) # Indo-US Library of Stellar Templates has a lower limit of 3460
+		auto_upp = determine_upper_bound(first_good,last_good)
+		if (auto_upp is not None):
+			new_fit_reg = (int(auto_low),int(auto_upp))	
+		elif (auto_upp is None):
+			new_fit_reg = None
+			return None, None
+	elif ((isinstance(fit_reg,tuple)==True) or (isinstance(fit_reg,list)==True) ):
+		# Check to see if tuple/list makes sense
+		if ((fit_reg[0]>fit_reg[1]) or (fit_reg[1]<fit_reg[0])): # if boundaries overlap
+			print('\n Fitting boundary error. \n')
+			new_fit_reg = None
+			return None, None
+		elif ((fit_reg[1]-fit_reg[0])<500.0): # if fitting region is < 500 A
+			print('\n Your fitting region is suspiciously small... \n')
+			new_fit_reg = None
+			return None, None
+		else:
+			man_low = np.max([3500.,first_good,fit_reg[0]])
+			# print man_low
+			man_upper_bound  = determine_upper_bound(fit_reg[0],fit_reg[1])
+			man_upp = np.min([man_upper_bound,fit_reg[1],last_good])
+			new_fit_reg = (int(man_low),int(man_upp))
 
-    for j, fname in enumerate(vazdekis):
-        hdu = fits.open(fname)
-        ssp = hdu[0].data
-        ssp = ssp[mask_temp]
-        ssp = gaussian_filter1d(ssp, sigma)  # perform convolution with variable sigma
-        sspNew,loglam_temp,velscale_temp = log_rebin(lamRange_temp, ssp, velscale=velscale)#[0]
-        templates[:, j] = sspNew/np.median(sspNew) # Normalizes templates
-    
-    # The galaxy and the template spectra do not have the same starting wavelength.
-    # For this reason an extra velocity shift DV has to be applied to the template
-    # to fit the galaxy spectrum. We remove this artificial shift by using the
-    # keyword VSYST in the call to PPXF below, so that all velocities are
-    # measured with respect to DV. This assume the redshift is negligible.
-    # In the case of a high-redshift galaxy one should de-redshift its
-    # wavelength to the rest frame before using the line below (see above).
-    #
-    dv = np.log(lam_temp[0]/lam_gal[0])*c    # km/s
-    vsyst = dv
+	# Determine number of good pixels in new fitting region
+	mask = ((lam_gal >= new_fit_reg[0]) & (lam_gal <= new_fit_reg[1]))
+	igood = np.where((gal[mask]>0) & (ivar[mask]>0) & (and_mask[mask]==0))[0]
+	ibad  = np.where(and_mask[mask]!=0)[0]
+	good_frac = (len(igood)*1.0)/len(gal[mask])
 
-    # Here the actual fit starts. The best fit is plotted on the screen.
-    # Gas emission lines are excluded from the pPXF fit using the GOODPIXELS keyword.
-    #
-    vel = 0.0#c*np.log(1 + z)   # eq.(8) of Cappellari (2017)
-    start = [vel, 200.,0.0,0.0]  # (km/s), starting guess for [V, sigma]
+	if 0:
+		##################################################################################
+		fig = plt.figure(figsize=(14,6))
+		ax1 = fig.add_subplot(1,1,1)
 
-    #################### Correct for galactic extinction ##################
+		ax1.plot(lam_gal,gal,linewidth=0.5)
+		ax1.axvline(new_fit_reg[0],linestyle='--',color='xkcd:yellow')
+		ax1.axvline(new_fit_reg[1],linestyle='--',color='xkcd:yellow')
 
-    co = coordinates.SkyCoord(ra=ra, dec=dec, unit=(u.deg, u.deg), frame='fk5')
-    try: 
-        table = IrsaDust.get_query_table(co,section='ebv')
-        ebv = table['ext SandF mean'][0]
-    except: 
-        ebv = 0.04
-    galaxy = ccm_unred(lam_gal,galaxy,ebv)
+		ax1.scatter(lam_gal[mask][ibad],gal[mask][ibad],color='red')
+		ax1.set_ylabel(r'$f_\lambda$ (erg cm$^{-2}$ s$^{-1}$ $\mathrm{\AA}^{-1}$)')
+		ax1.set_xlabel(r'$\lambda_{\rm{rest}}$ ($\mathrm{\AA}$)')
 
-    #######################################################################
+		plt.tight_layout()
+		plt.savefig(run_dir+'good_pixels.pdf',fmt='pdf',dpi=150)
+	##################################################################################
 
-    # Plot the galaxy+ templates
-    fig = plt.figure(figsize=(14,6))
-    ax1 = fig.add_subplot(2,1,1)
-    ax2 = fig.add_subplot(2,1,2)
-    ax1.step(lam_gal,galaxy,label='Galaxy')
-    ax1.fill_between(lam_gal,galaxy-noise,galaxy+noise,color='gray',alpha=0.5)
-    ax2.plot(np.exp(loglam_temp),templates[:,-25:],alpha=0.5,label='Template')
-    ax1.set_xlabel(r'Wavelength, $\lambda$ ($\mathrm{\AA}$)',fontsize=12)
-    ax2.set_xlabel(r'Wavelength, $\lambda$ ($\mathrm{\AA}$)',fontsize=12)
-    ax1.set_ylabel(r'$f_\lambda$ (erg cm$^{-2}$ s$^{-1}$ $\mathrm{\AA}^{-1}$)',fontsize=12)
-    ax2.set_ylabel(r'Normalized Flux',fontsize=12)
-    ax1.legend(loc='best')
-    plt.tight_layout()
-    plt.savefig(run_dir+'sdss_prepare.png',dpi=300,fmt='png')
-    
-    
-    return lam_gal,galaxy,templates,noise,fwhm_gal,velscale,dv,vazdekis,z,ebv
+	return new_fit_reg,good_frac
 
 ##################################################################################
 
-####################### Galactic Extinction Correction ###########################
+
+#### Galactic Extinction Correction ##############################################
 
 def ccm_unred(wave, flux, ebv, r_v=""):
     """ccm_unred(wave, flux, ebv, r_v="")
@@ -357,17 +329,2030 @@ def ccm_unred(wave, flux, ebv, r_v=""):
 
     return funred #,a_lambda
 
+
+
+#### Prepare SDSS spectrum for pPXF ################################################
+
+def sdss_prepare(file,fit_reg,temp_dir,run_dir):
+	"""
+	Prepare an SDSS spectrum for pPXF, returning all necessary 
+	parameters. 
+	
+	file: fully-specified path of the spectrum 
+	z: the redshift; we use the SDSS-measured redshift
+	fit_reg: (min,max); tuple specifying the minimum and maximum 
+	        wavelength bounds of the region to be fit. 
+	
+	"""
+	# Load the data
+	hdu = fits.open(file)
+
+	specobj = hdu[2].data
+	z = specobj['z'][0]
+	ra = specobj['PLUG_RA'][0]
+	dec = specobj['PLUG_DEC'][0]
+
+	t = hdu['COADD'].data
+	
+	# Only use the wavelength range in common between galaxy and stellar library.
+	# Determine limits of spectrum vs templates
+	# mask = ( (t['loglam'] > np.log10(3540)) & (t['loglam'] < np.log10(7409)) )
+	fit_min,fit_max = float(fit_reg[0]),float(fit_reg[1])
+	mask = ( (t['loglam'] > np.log10(fit_min*(1+z))) & (t['loglam'] < np.log10(fit_max*(1+z))) )
+	
+	# Unpack the spectra
+	flux = t['flux'][mask]
+	galaxy = flux  
+	# SDSS spectra are already log10-rebinned
+	loglam_gal = t['loglam'][mask] # This is the observed SDSS wavelength range, NOT the rest wavelength range of the galaxy
+	lam_gal = 10**loglam_gal
+	ivar = t['ivar'][mask]# inverse variance
+	noise = np.sqrt(1.0/ivar)
+
+	c = 299792.458                  # speed of light in km/s
+	frac = lam_gal[1]/lam_gal[0]    # Constant lambda fraction per pixel
+	dlam_gal = (frac - 1)*lam_gal   # Size of every pixel in Angstrom
+	# print('\n Size of every pixel: %s (A)' % dlam_gal)
+	wdisp = t['wdisp'][mask]        # Intrinsic dispersion of every pixel, in pixels units
+	fwhm_gal = 2.355*wdisp*dlam_gal # Resolution FWHM of every pixel, in Angstroms
+	velscale = np.log(frac)*c       # Constant velocity scale in km/s per pixel
+	
+	# If the galaxy is at significant redshift, one should bring the galaxy
+	# spectrum roughly to the rest-frame wavelength, before calling pPXF
+	# (See Sec2.4 of Cappellari 2017). In practice there is no
+	# need to modify the spectrum in any way, given that a red shift
+	# corresponds to a linear shift of the log-rebinned spectrum.
+	# One just needs to compute the wavelength range in the rest-frame
+	# and adjust the instrumental resolution of the galaxy observations.
+	# This is done with the following three commented lines:
+	#
+	lam_gal = lam_gal/(1+z)  # Compute approximate restframe wavelength
+	fwhm_gal = fwhm_gal/(1+z)   # Adjust resolution in Angstrom
+
+	# Read the list of filenames from the Single Stellar Population library
+	# by Vazdekis (2010, MNRAS, 404, 1639) http://miles.iac.es/. A subset
+	# of the library is included for this example with permission
+	# num_temp = 10 # number of templates
+	# temp_list = glob.glob(temp_dir + '/Mun1.30Z*.fits')#[:num_temp]
+	temp_list = glob.glob(temp_dir + '/*.fits')#[:num_temp]
+
+	temp_list = natsort.natsorted(temp_list) # Sort them in the order they appear in the directory
+	# fwhm_tem = 2.51 # Vazdekis+10 spectra have a constant resolution FWHM of 2.51A.
+	fwhm_tem = 1.35 # Indo-US Template Library FWHM
+
+	# Extract the wavelength range and logarithmically rebin one spectrum
+	# to the same velocity scale of the SDSS galaxy spectrum, to determine
+	# the size needed for the array which will contain the template spectra.
+	#
+	hdu = fits.open(temp_list[0])
+	ssp = hdu[0].data
+	h2 = hdu[0].header
+	lam_temp = np.array(h2['CRVAL1'] + h2['CDELT1']*np.arange(h2['NAXIS1']))
+	# By cropping the templates we save some fitting time
+	mask_temp = ( (lam_temp > (fit_min-200.)) & (lam_temp < (fit_max+200.)) )
+	ssp = ssp[mask_temp]
+	lam_temp = lam_temp[mask_temp]
+
+	lamRange_temp = [np.min(lam_temp), np.max(lam_temp)]
+	sspNew = log_rebin(lamRange_temp, ssp, velscale=velscale)[0]
+	templates = np.empty((sspNew.size, len(temp_list)))
+	
+	# Interpolates the galaxy spectral resolution at the location of every pixel
+	# of the templates. Outside the range of the galaxy spectrum the resolution
+	# will be extrapolated, but this is irrelevant as those pixels cannot be
+	# used in the fit anyway.
+	fwhm_gal = np.interp(lam_temp, lam_gal, fwhm_gal)
+
+	# Convolve the whole Vazdekis library of spectral templates
+	# with the quadratic difference between the SDSS and the
+	# Vazdekis instrumental resolution. Logarithmically rebin
+	# and store each template as a column in the array TEMPLATES.
+	
+	# Quadratic sigma difference in pixels Vazdekis --> SDSS
+	# The formula below is rigorously valid if the shapes of the
+	# instrumental spectral profiles are well approximated by Gaussians.
+	#
+	# In the line below, the fwhm_dif is set to zero when fwhm_gal < fwhm_tem.
+	# In principle it should never happen and a higher resolution template should be used.
+	#
+	fwhm_dif = np.sqrt((fwhm_gal**2 - fwhm_tem**2).clip(0))
+	sigma = fwhm_dif/2.355/h2['CDELT1'] # Sigma difference in pixels
+
+	for j, fname in enumerate(temp_list):
+	    hdu = fits.open(fname)
+	    ssp = hdu[0].data
+	    ssp = ssp[mask_temp]
+	    ssp = gaussian_filter1d(ssp, sigma)  # perform convolution with variable sigma
+	    sspNew,loglam_temp,velscale_temp = log_rebin(lamRange_temp, ssp, velscale=velscale)#[0]
+	    templates[:, j] = sspNew/np.median(sspNew) # Normalizes templates
+	
+	# The galaxy and the template spectra do not have the same starting wavelength.
+	# For this reason an extra velocity shift DV has to be applied to the template
+	# to fit the galaxy spectrum. We remove this artificial shift by using the
+	# keyword VSYST in the call to PPXF below, so that all velocities are
+	# measured with respect to DV. This assume the redshift is negligible.
+	# In the case of a high-redshift galaxy one should de-redshift its
+	# wavelength to the rest frame before using the line below (see above).
+	#
+	dv = np.log(lam_temp[0]/lam_gal[0])*c    # km/s
+	vsyst = dv
+
+	# Here the actual fit starts. The best fit is plotted on the screen.
+	# Gas emission lines are excluded from the pPXF fit using the GOODPIXELS keyword.
+	#
+	vel = 0.0#c*np.log(1 + z)   # eq.(8) of Cappellari (2017)
+	start = [vel, 200.,0.0,0.0]  # (km/s), starting guess for [V, sigma]
+
+	#################### Correct for galactic extinction ##################
+
+	co = coordinates.SkyCoord(ra=ra, dec=dec, unit=(u.deg, u.deg), frame='fk5')
+	try: 
+	    table = IrsaDust.get_query_table(co,section='ebv')
+	    ebv = table['ext SandF mean'][0]
+	except: 
+	    ebv = 0.04
+	galaxy = ccm_unred(lam_gal,galaxy,ebv)
+
+	#######################################################################
+
+	npix = galaxy.shape[0] # number of output pixels
+	ntemp = np.shape(templates)[1]# number of templates
+	
+	# Pre-compute FFT of templates, since they do not change (only the LOSVD and convolution changes)
+	temp_fft,npad = template_rfft(templates) # we will use this throughout the code
+	
+	################################################################################   
+
+	# Plot the galaxy+ templates
+	fig = plt.figure(figsize=(14,6))
+	ax1 = fig.add_subplot(2,1,1)
+	ax2 = fig.add_subplot(2,1,2)
+	ax1.step(lam_gal,galaxy,label='Galaxy',linewidth=0.5)
+	# ax1.fill_between(lam_gal,galaxy-noise,galaxy+noise,color='gray',alpha=0.5,linewidth=0.5)
+	ax1.step(lam_gal,noise,label='Error Spectrum',linewidth=0.5,color='gray')
+	ax1.axhline(0.0,color='white',linewidth=0.5,linestyle='--')
+	ax2.plot(np.exp(loglam_temp),templates[:,:],alpha=0.5,label='Template',linewidth=0.5)
+	ax1.set_xlabel(r'$\lambda_{\rm{rest}}$ ($\mathrm{\AA}$)',fontsize=12)
+	ax2.set_xlabel(r'$\lambda_{\rm{rest}}$ ($\mathrm{\AA}$)',fontsize=12)
+	ax1.set_ylabel(r'$f_\lambda$ (erg cm$^{-2}$ s$^{-1}$ $\mathrm{\AA}^{-1}$)',fontsize=12)
+	ax2.set_ylabel(r'Normalized Flux',fontsize=12)
+	ax1.set_xlim(np.min(lam_gal),np.max(lam_gal))
+	ax2.set_xlim(np.min(lam_gal),np.max(lam_gal))
+	ax1.legend(loc='best')
+	plt.tight_layout()
+	# plt.savefig(run_dir+'sdss_prepare.png',dpi=300,fmt='png')
+	plt.savefig(run_dir+'sdss_prepare.pdf',dpi=150,fmt='pdf')
+
+	
+	
+	return lam_gal,galaxy,templates,noise,velscale,vsyst,temp_list,z,ebv,npix,ntemp,temp_fft,npad
+
 ##################################################################################
+
+
+
+
+#### Initialize Parameters #######################################################
+
+
+def initialize_mcmc(lam_gal,galaxy,fit_reg,fit_type='init',fit_feii=True,fit_losvd=True,fit_power=True,fit_broad=True,fit_narrow=True,fit_outflows=True,tie_narrow=True):
+	# Issue warnings for dumb options
+	if ((fit_narrow==False) & (fit_outflows==True)): # why would you fit outflow without narrow lines?
+		raise ValueError('\n Why would you fit outflows without narrow lines? Turn on narrow line component! \n')
+
+	################################################################################
+	# Initial conditions for some parameters
+	max_flux = np.max(galaxy)
+	total_flux_init = np.median(galaxy)#np.median(galaxy[(lam_gal>5025.) & (lam_gal<5800.)])
+	# cont_flux_init = 0.01*(np.median(galaxy))
+	feii_flux_init= (0.1*np.median(galaxy))
+
+	if (((fit_reg[0]+25) < 6085. < (fit_reg[1]-25))==True):
+		fevii6085_amp_init= (np.max(galaxy[(lam_gal>6085.-25.) & (lam_gal<6085.+25.)]))
+	if (((fit_reg[0]+25) < 5722. < (fit_reg[1]-25))==True):
+		fevii5722_amp_init= (np.max(galaxy[(lam_gal>5722.-25.) & (lam_gal<5722.+25.)]))
+	if (((fit_reg[0]+25) < 6302. < (fit_reg[1]-25))==True):
+		oi_amp_init= (np.max(galaxy[(lam_gal>6302.-25.) & (lam_gal<6302.+25.)]))
+	if (((fit_reg[0]+25) < 3727. < (fit_reg[1]-25))==True):
+		oii_amp_init= (np.max(galaxy[(lam_gal>3727.-25.) & (lam_gal<3727.+25.)]))
+	if (((fit_reg[0]+25) < 3870. < (fit_reg[1]-25))==True):
+		neiii_amp_init= (np.max(galaxy[(lam_gal>3870.-25.) & (lam_gal<3870.+25.)]))
+	if (((fit_reg[0]+25) < 4102. < (fit_reg[1]-25))==True):
+		hd_amp_init= (np.max(galaxy[(lam_gal>4102.-25.) & (lam_gal<4102.+25.)]))
+	if (((fit_reg[0]+25) < 4341. < (fit_reg[1]-25))==True):
+		hg_amp_init= (np.max(galaxy[(lam_gal>4341.-25.) & (lam_gal<4341.+25.)]))
+	if (((fit_reg[0]+25) < 4862. < (fit_reg[1]-25))==True):
+		hb_amp_init= (np.max(galaxy[(lam_gal>4862.-25.) & (lam_gal<4862.+25.)]))
+	if (((fit_reg[0]+25) < 5007. < (fit_reg[1]-25))==True):
+		oiii5007_amp_init = (np.max(galaxy[(lam_gal>5007.-25.) & (lam_gal<5007.+25.)]))
+	if (((fit_reg[0]+25) < 6564. < (fit_reg[1]-25))==True):
+		ha_amp_init = (np.max(galaxy[(lam_gal>6564.-25.) & (lam_gal<6564.+25.)]))
+	if (((fit_reg[0]+25) < 6725. < (fit_reg[1]-25))==True):
+		sii_amp_init = (np.max(galaxy[(lam_gal>6725.-15.) & (lam_gal<6725.+15.)]))
+	################################################################################
+    
+	mcmc_input = {} # dictionary of parameter dictionaries
+
+	#### Host Galaxy ###############################################################
+	# Galaxy template amplitude
+	if (fit_type=='init') or ((fit_type=='final') and (fit_losvd==False)):
+		print(' Fitting a host-galaxy template.')
+
+		mcmc_input['gal_temp_amp'] = ({'name':'gal_temp_amp',
+		                			   'label':'$A_\mathrm{gal}$',
+		                			   'init':0.5*total_flux_init,
+		                			   'plim':(0.0,max_flux),
+		                			   'pcolor':'blue',
+		                			   })
+	# Stellar velocity
+	if ((fit_type=='final') and (fit_losvd==True)):
+		print(' Fitting the stellar LOSVD.')
+		mcmc_input['stel_vel'] = ({'name':'stel_vel',
+		                   		   'label':'$V_*$',
+		                   		   'init':100. ,
+		                   		   'plim':(-500.,500.),
+		                   		   'pcolor':'blue',
+		                   		   })
+		# Stellar velocity dispersion
+		mcmc_input['stel_disp'] = ({'name':'stel_disp',
+		                   			'label':'$\sigma_*$',
+		                   			'init':100.0,
+		                   			'plim':(30.0,400.),
+		                   			'pcolor':'dodgerblue',
+		                   			})
+	##############################################################################
+
+	#### AGN Power-Law ###########################################################
+	if (fit_power==True):
+		print(' Fitting AGN power-law continuum.')
+		# AGN simple power-law amplitude
+		mcmc_input['power_amp'] = ({'name':'power_amp',
+		                   		   'label':'$A_\mathrm{power}$',
+		                   		   'init':(0.5*total_flux_init),
+		                   		   'plim':(0.0,max_flux),
+		                   		   'pcolor':'orangered',
+		                   		   })
+		# AGN simple power-law slope
+		mcmc_input['power_slope'] = ({'name':'power_slope',
+		                   			 'label':'$m_\mathrm{power}$',
+		                   			 'init':-1.0  ,
+		                   			 'plim':(-4.0,2.0),
+		                   			 'pcolor':'salmon',
+		                   			 })
+		# AGN simple power-law kink
+		mcmc_input['power_kink'] = ({'name':'power_kink',
+		                   			 'label':'$x_{b,\mathrm{power}}$',
+		                   			 'init': (np.max(lam_gal)-((np.max(lam_gal)-np.min(lam_gal))/2.0)),
+		                   			 'plim':(np.min(lam_gal),np.max(lam_gal)),
+		                   			 'pcolor':'tomato',
+		                   			 })
+		
+	##############################################################################
+
+	#### FeII Templates ##########################################################
+	if (fit_feii==True):
+		print(' Fitting narrow and broad FeII.')
+		# Narrow FeII amplitude
+		mcmc_input['na_feii_amp'] = ({'name':'na_feii_amp',
+		                   			  'label':'$A_\mathrm{Na\;FeII}$',
+		                   			  'init':feii_flux_init,
+		                   			  'plim':(0.0,total_flux_init),
+		                   			  'pcolor':'sandybrown',
+		                   			  })
+		# Broad FeII amplitude
+		mcmc_input['br_feii_amp'] = ({'name':'br_feii_amp',
+		                   			  'label':'$A_\mathrm{Br\;FeII}$',
+		                   			  'init':feii_flux_init,
+		                   			  'plim':(0.0,total_flux_init),
+		                   			  'pcolor':'darkorange',
+		                   			  })
+	##############################################################################
+
+	#### Emission Lines ##########################################################
+
+	#### Jenna's Lines ##############################################
+	if 0:#((fit_narrow==True) and ((fit_reg[1]-25.) > 5722.) ):
+		print(" Fitting Jenna's Lines: ")
+		if (((fit_reg[0]+25.) < 6302.046 < (fit_reg[1]-25.))==True):
+			print('          Fitting narrow [OI]6300 emission.')
+			# Na. [OI]6300 Core Amplitude
+			mcmc_input['na_oi_6300_amp'] = ({'name':'na_oi_6300_amp',
+			                   				    'label':'$A_{\mathrm{[OI]6300}}$',
+			                   				    'init':(oi_amp_init-total_flux_init),
+			                   				    'plim':(0.0,max_flux),
+			                   				    'pcolor':'green',
+			                   				    })
+			# Na. [OI]6300 Core FWHM
+			mcmc_input['na_oi_6300_fwhm'] = ({'name':'na_oi_6300_fwhm',
+			                   					 'label':'$\mathrm{FWHM}_{\mathrm{[OI]6300}}$',
+			                   					 'init':250.,
+			                   					 'plim':(0.0,1000.),
+			                   					 'pcolor':'limegreen',
+			                   					 })
+			# Na. [OI]6300 Core VOFF
+			mcmc_input['na_oi_6300_voff'] = ({'name':'na_oi_6300_voff',
+			                   					 'label':'$\mathrm{VOFF}_{\mathrm{[OI]6300}}$',
+			                   					 'init':0.,
+			                   					 'plim':(-1000.,1000.),
+			                   					 'pcolor':'palegreen',
+			                   					 })
+		if (((fit_reg[0]+25.) < 5722. < (fit_reg[1]-25.))==True):
+			print('          Fitting narrow [FeVII]5722 emission.')
+			# Na. [OI]6300 Core Amplitude
+			mcmc_input['na_fevii_5722_amp'] = ({'name':'na_fevii_5722_amp',
+			                   				    'label':'$A_{\mathrm{[FeVII]5722}}$',
+			                   				    'init':(fevii5722_amp_init-total_flux_init),
+			                   				    'plim':(0.0,max_flux),
+			                   				    'pcolor':'green',
+			                   				    })
+			# Na. [OI]6300 Core FWHM
+			mcmc_input['na_fevii_5722_fwhm'] = ({'name':'na_fevii_5722_fwhm',
+			                   					 'label':'$\mathrm{FWHM}_{\mathrm{[FeVII]5722}}$',
+			                   					 'init':250.,
+			                   					 'plim':(0.0,1000.),
+			                   					 'pcolor':'limegreen',
+			                   					 })
+			# Na. [OI]6300 Core VOFF
+			mcmc_input['na_fevii_5722_voff'] = ({'name':'na_fevii_5722_voff',
+			                   					 'label':'$\mathrm{VOFF}_{\mathrm{[FeVII]5722}}$',
+			                   					 'init':0.,
+			                   					 'plim':(-1000.,1000.),
+			                   					 'pcolor':'palegreen',
+			                   					 })
+		if (((fit_reg[0]+25.) < 6085. < (fit_reg[1]-25.))==True):
+			print('          Fitting narrow [FeVII]6085 emission.')
+			# Na. [OI]6300 Core Amplitude
+			mcmc_input['na_fevii_6085_amp'] = ({'name':'na_fevii_6085_amp',
+			                   				    'label':'$A_{\mathrm{[FeVII]6085}}$',
+			                   				    'init':(fevii6085_amp_init-total_flux_init),
+			                   				    'plim':(0.0,max_flux),
+			                   				    'pcolor':'green',
+			                   				    })
+			# Na. [OI]6300 Core FWHM
+			mcmc_input['na_fevii_6085_fwhm'] = ({'name':'na_fevii_6085_fwhm',
+			                   					 'label':'$\mathrm{FWHM}_{\mathrm{[FeVII]6085}}$',
+			                   					 'init':250.,
+			                   					 'plim':(0.0,1000.),
+			                   					 'pcolor':'limegreen',
+			                   					 })
+			# Na. [OI]6300 Core VOFF
+			mcmc_input['na_fevii_6085_voff'] = ({'name':'na_fevii_6085_voff',
+			                   					 'label':'$\mathrm{VOFF}_{\mathrm{[FeVII]6085}}$',
+			                   					 'init':0.,
+			                   					 'plim':(-1000.,1000.),
+			                   					 'pcolor':'palegreen',
+			                   					 })
+
+	###################################################################
+
+	#### Narrow [OII] Doublet ##############################################
+	if ((fit_narrow==True) and ((((fit_reg[0]+25.) < 3727.092 < (fit_reg[1]-25.))==True))):
+		print(' Fitting narrow H-delta emission.')
+		# Na. [OII]3727 Core Amplitude
+		mcmc_input['na_oii3727_core_amp'] = ({'name':'na_oii3727_core_amp',
+		                   				    'label':'$A_{\mathrm{[OII]3727}}$',
+		                   				    'init':(oii_amp_init-total_flux_init),
+		                   				    'plim':(0.0,max_flux),
+		                   				    'pcolor':'green',
+		                   				    })
+		if (tie_narrow==False):
+			# Na. [OII]3727 Core FWHM
+			mcmc_input['na_oii3727_core_fwhm'] = ({'name':'na_oii3727_core_fwhm',
+			                   					 'label':'$\mathrm{FWHM}_{\mathrm{[OII]3727}}$',
+			                   					 'init':250.,
+			                   					 'plim':(0.0,1000.),
+			                   					 'pcolor':'limegreen',
+			                   					 })
+		# Na. [OII]3727 Core VOFF
+		mcmc_input['na_oii3727_core_voff'] = ({'name':'na_oii3727_core_voff',
+		                   					 'label':'$\mathrm{VOFF}_{\mathrm{[OII]3727}}$',
+		                   					 'init':0.,
+		                   					 'plim':(-1000.,1000.),
+		                   					 'pcolor':'palegreen',
+		                   					 })
+		# Na. [OII]3729 Core Amplitude
+		mcmc_input['na_oii3729_core_amp'] = ({'name':'na_oii3729_core_amp',
+		                   				    'label':'$A_{\mathrm{[OII]3729}}$',
+		                   				    'init':(oii_amp_init-total_flux_init),
+		                   				    'plim':(0.0,max_flux),
+		                   				    'pcolor':'green',
+		                   				    })
+
+	###################################################################
+	#### Narrow [NeIII]3870 ##############################################
+	if ((fit_narrow==True) and ((((fit_reg[0]+25.) < 3869.81 < (fit_reg[1]-25.))==True))):
+		print(' Fitting narrow [NIII]3870 emission.')
+		# Na. [NIII]3870 Core Amplitude
+		mcmc_input['na_neiii_core_amp'] = ({'name':'na_neiii_core_amp',
+		                   				    'label':'$A_{\mathrm{[NeIII]}}$',
+		                   				    'init':(neiii_amp_init-total_flux_init),
+		                   				    'plim':(0.0,max_flux),
+		                   				    'pcolor':'green',
+		                   				    })
+		if (tie_narrow==False):
+			# Na. [NIII]3870 Core FWHM
+			mcmc_input['na_neiii_core_fwhm'] = ({'name':'na_neiii_core_fwhm',
+			                   					 'label':'$\mathrm{FWHM}_{\mathrm{[NeIII]}}$',
+			                   					 'init':250.,
+			                   					 'plim':(0.0,1000.),
+			                   					 'pcolor':'limegreen',
+			                   					 })
+		# Na. [NIII]3870 Core VOFF
+		mcmc_input['na_neiii_core_voff'] = ({'name':'na_neiii_core_voff',
+		                   					 'label':'$\mathrm{VOFF}_{\mathrm{[NeIII]}}$',
+		                   					 'init':0.,
+		                   					 'plim':(-1000.,1000.),
+		                   					 'pcolor':'palegreen',
+		                   					 })
+
+	###################################################################
+
+	#### Narrow H-delta ###############################################
+	if ((fit_narrow==True) and ((((fit_reg[0]+25.) < 4102.89 < (fit_reg[1]-25.))==True))):
+		print(' Fitting narrow H-delta emission.')
+		# Na. H-delta Core Amplitude
+		mcmc_input['na_Hd_amp'] = ({'name':'na_Hd_amp',
+		                   				    'label':'$A_{\mathrm{H}\delta}$',
+		                   				    'init':(hd_amp_init-total_flux_init),
+		                   				    'plim':(0.0,max_flux),
+		                   				    'pcolor':'green',
+		                   				    })
+		if (tie_narrow==False):
+			# Na. H-delta Core FWHM
+			mcmc_input['na_Hd_fwhm'] = ({'name':'na_Hd_fwhm',
+			                   					 'label':'$\mathrm{FWHM}_{\mathrm{H}\delta}$',
+			                   					 'init':250.,
+			                   					 'plim':(0.0,1000.),
+			                   					 'pcolor':'limegreen',
+			                   					 })
+		# Na. H-delta Core VOFF
+		mcmc_input['na_Hd_voff'] = ({'name':'na_Hd_voff',
+		                   					 'label':'$\mathrm{VOFF}_{\mathrm{H}\delta}$',
+		                   					 'init':0.,
+		                   					 'plim':(-1000.,1000.),
+		                   					 'pcolor':'palegreen',
+		                   					 })
+
+	##############################################################################
+
+	#### Broad Line H-delta ######################################################
+	# if ((fit_broad==True) and ((((fit_reg[0]+25.) < 4102.89 < (fit_reg[1]-25.))==True))):
+	# 	print(' Fitting broadline H-delta.')
+	# 	# Br. H-delta amplitude
+	# 	mcmc_input['br_Hd_amp'] = ({'name':'br_Hd_amp',
+	# 	                   			'label':'$A_{\mathrm{Br.\;Hd}}$' ,
+	# 	                   			'init':(hd_amp_init-total_flux_init)/2.0  ,
+	# 	                   			'plim':(0.0,max_flux),
+	# 	                   			'pcolor':'steelblue',
+	# 	                   			})
+	# 	# Br. H-delta FWHM
+	# 	mcmc_input['br_Hd_fwhm'] = ({'name':'br_Hd_fwhm',
+	# 	               	   			 'label':'$\mathrm{FWHM}_{\mathrm{Br.\;Hd}}$',
+	# 	               	   			 'init':2500.,
+	# 	               	   			 'plim':(0.0,10000.),
+	# 	               	   			 'pcolor':'royalblue',
+	# 	               	   			 })
+	# 	# Br. H-delta VOFF
+	# 	mcmc_input['br_Hd_voff'] = ({'name':'br_Hd_voff',
+	# 	               	   		 	 'label':'$\mathrm{VOFF}_{\mathrm{Br.\;Hd}}$',
+	# 	               	   		 	 'init':0.,
+	# 	               	   		 	 'plim':(-1000.,1000.),
+	# 	               	   		 	 'pcolor':'turquoise',
+	# 	               	   		 	 })
+	##############################################################################
+
+	#### Narrow H-gamma/[OIII]4363 ###############################################
+	if ((fit_narrow==True) and ((((fit_reg[0]+25.) < 4341.68 < (fit_reg[1]-25.))==True))):
+		print(' Fitting narrow H-gamma/[OIII]4363 emission.')
+		# Na. H-gamma Core Amplitude
+		mcmc_input['na_Hg_amp'] = ({'name':'na_Hg_amp',
+		                   				    'label':'$A_{\mathrm{H}\gamma}$',
+		                   				    'init':(hg_amp_init-total_flux_init),
+		                   				    'plim':(0.0,max_flux),
+		                   				    'pcolor':'green',
+		                   				    })
+		if (tie_narrow==False):
+			# Na. H-gamma Core FWHM
+			mcmc_input['na_Hg_fwhm'] = ({'name':'na_Hg_fwhm',
+			                   					 'label':'$\mathrm{FWHM}_{\mathrm{H}\gamma}$',
+			                   					 'init':250.,
+			                   					 'plim':(0.0,1000.),
+			                   					 'pcolor':'limegreen',
+			                   					 })
+		# Na. H-gamma Core VOFF
+		mcmc_input['na_Hg_voff'] = ({'name':'na_Hg_voff',
+		                   					 'label':'$\mathrm{VOFF}_{\mathrm{H}\gamma}$',
+		                   					 'init':0.,
+		                   					 'plim':(-1000.,1000.),
+		                   					 'pcolor':'palegreen',
+		                   					 })
+		# Na. [OIII]4363 Core Amplitude
+		mcmc_input['oiii4363_core_amp'] = ({'name':'oiii4363_core_amp',
+		                   				    'label':'$A_\mathrm{[OIII]4363\;Core}$',
+		                   				    'init':(hg_amp_init-total_flux_init),
+		                   				    'plim':(0.0,max_flux),
+		                   				    'pcolor':'green',
+		                   				    })
+		if (tie_narrow==False):
+			# Na. [OIII]4363 Core FWHM
+			mcmc_input['oiii4363_core_fwhm'] = ({'name':'oiii4363_core_fwhm',
+			                   					 'label':'$\mathrm{FWHM}_\mathrm{[OIII]4363\;Core}$',
+			                   					 'init':250.,
+			                   					 'plim':(0.0,1000.),
+			                   					 'pcolor':'limegreen',
+			                   					 })
+		# Na. [OIII]4363 Core VOFF
+		mcmc_input['oiii4363_core_voff'] = ({'name':'oiii4363_core_voff',
+		                   					 'label':'$\mathrm{VOFF}_\mathrm{[OIII]4363\;Core}$',
+		                   					 'init':0.,
+		                   					 'plim':(-1000.,1000.),
+		                   					 'pcolor':'palegreen',
+		                   					 })
+
+	##############################################################################
+
+	#### Broad Line H-gamma ######################################################
+	if ((fit_broad==True) and ((((fit_reg[0]+25.) < 4341.68 < (fit_reg[1]-25.))==True))):
+		print(' Fitting broadline H-gamma.')
+		# Br. H-beta amplitude
+		mcmc_input['br_Hg_amp'] = ({'name':'br_Hg_amp',
+		                   			'label':'$A_{\mathrm{Br.\;Hg}}$' ,
+		                   			'init':(hg_amp_init-total_flux_init)/2.0  ,
+		                   			'plim':(0.0,max_flux),
+		                   			'pcolor':'steelblue',
+		                   			})
+		# Br. H-beta FWHM
+		mcmc_input['br_Hg_fwhm'] = ({'name':'br_Hg_fwhm',
+		               	   			 'label':'$\mathrm{FWHM}_{\mathrm{Br.\;Hg}}$',
+		               	   			 'init':2500.,
+		               	   			 'plim':(0.0,10000.),
+		               	   			 'pcolor':'royalblue',
+		               	   			 })
+		# Br. H-beta VOFF
+		mcmc_input['br_Hg_voff'] = ({'name':'br_Hg_voff',
+		               	   		 	 'label':'$\mathrm{VOFF}_{\mathrm{Br.\;Hg}}$',
+		               	   		 	 'init':0.,
+		               	   		 	 'plim':(-1000.,1000.),
+		               	   		 	 'pcolor':'turquoise',
+		               	   		 	 })
+	##############################################################################
+
+
+
+	#### Narrow Hb/[OIII] Core ###########################################################
+	if ((fit_narrow==True) and ((((fit_reg[0]+25.) < 5008.240 < (fit_reg[1]-25.))==True))):
+		print(' Fitting narrow H-beta/[OIII]4959,5007 emission.')
+		# Na. [OIII]5007 Core Amplitude
+		mcmc_input['oiii5007_core_amp'] = ({'name':'oiii5007_core_amp',
+		                   				    'label':'$A_\mathrm{[OIII]5007\;Core}$',
+		                   				    'init':(oiii5007_amp_init-total_flux_init),
+		                   				    'plim':(0.0,max_flux),
+		                   				    'pcolor':'green',
+		                   				    })
+		# If tie_narrow=True, then all line widths are tied to [OIII]5007, as well as their outflows (currently H-alpha/[NII]/[SII] outflows only)
+		# Na. [OIII]5007 Core FWHM
+		mcmc_input['oiii5007_core_fwhm'] = ({'name':'oiii5007_core_fwhm',
+		                   					 'label':'$\mathrm{FWHM}_\mathrm{[OIII]5007\;Core}$',
+		                   					 'init':250.,
+		                   					 'plim':(0.0,1000.),
+		                   					 'pcolor':'limegreen',
+		                   					 })
+		# Na. [OIII]5007 Core VOFF
+		mcmc_input['oiii5007_core_voff'] = ({'name':'oiii5007_core_voff',
+		                   					 'label':'$\mathrm{VOFF}_\mathrm{[OIII]5007\;Core}$',
+		                   					 'init':0.,
+		                   					 'plim':(-1000.,1000.),
+		                   					 'pcolor':'palegreen',
+		                   					 })
+		# Na. H-beta amplitude
+		mcmc_input['na_Hb_amp'] = ({'name':'na_Hb_amp',
+		                   		 	'label':'$A_{\mathrm{Na.\;Hb}}$' ,
+		                   		 	'init':(hb_amp_init-total_flux_init) ,
+		                   		 	'plim':(0.0,max_flux),
+		                   		 	'pcolor':'gold',
+		                   		 	})
+		# Na. H-beta FWHM tied to [OIII]5007 FWHM
+		# Na. H-beta VOFF
+		mcmc_input['na_Hb_voff'] = ({'name':'na_Hb_voff',
+		                   			 'label':'$\mathrm{VOFF}_{\mathrm{Na.\;Hb}}$',
+		                   			 'init':0.,
+		                   			 'plim':(-1000,1000.),
+		                   			 'pcolor':'yellow',
+		                   			 })
+	##############################################################################
+
+	#### Hb/[OIII] Outflows ######################################################
+	if ((fit_narrow==True) and (fit_outflows==True) and ((((fit_reg[0]+25.) < 5008.240 < (fit_reg[1]-25.))==True))):
+		print(' Fitting H-beta/[OIII]4959,5007 outflows.')
+		# Br. [OIII]5007 Outflow amplitude
+		mcmc_input['oiii5007_outflow_amp'] = ({'name':'oiii5007_outflow_amp',
+		                   					   'label':'$A_\mathrm{[OIII]5007\;Outflow}$' ,
+		                   					   'init':(oiii5007_amp_init-total_flux_init)/2.,
+		                   					   'plim':(0.0,max_flux),
+		                   					   'pcolor':'mediumpurple',
+		                   					   })
+		# Br. [OIII]5007 Outflow FWHM
+		mcmc_input['oiii5007_outflow_fwhm'] = ({'name':'oiii5007_outflow_fwhm',
+		                   						'label':'$\mathrm{FWHM}_\mathrm{[OIII]5007\;Outflow}$',
+		                   						'init':450.,
+		                   						'plim':(0.0,2500.),
+		                   						'pcolor':'darkorchid',
+		                   						})
+		# Br. [OIII]5007 Outflow VOFF
+		mcmc_input['oiii5007_outflow_voff'] = ({'name':'oiii5007_outflow_voff',
+		                   						'label':'$\mathrm{VOFF}_\mathrm{[OIII]5007\;Outflow}$',
+		                   						'init':-50.,
+		                   						'plim':(-2000.,2000.),
+		                   						'pcolor':'orchid',
+		                   						})
+		# Br. [OIII]4959 Outflow is tied to all components of [OIII]5007 outflow
+	##############################################################################
+
+	#### Broad Line H-beta ############################################################
+	if ((fit_broad==True) and ((((fit_reg[0]+25.) < 5008.240 < (fit_reg[1]-25.))==True))):
+		print(' Fitting broadline H-beta.')
+		# Br. H-beta amplitude
+		mcmc_input['br_Hb_amp'] = ({'name':'br_Hb_amp',
+		                   			'label':'$A_{\mathrm{Br.\;Hb}}$' ,
+		                   			'init':(hb_amp_init-total_flux_init)/2.0  ,
+		                   			'plim':(0.0,max_flux),
+		                   			'pcolor':'steelblue',
+		                   			})
+		# Br. H-beta FWHM
+		mcmc_input['br_Hb_fwhm'] = ({'name':'br_Hb_fwhm',
+		               	   			 'label':'$\mathrm{FWHM}_{\mathrm{Br.\;Hb}}$',
+		               	   			 'init':2500.,
+		               	   			 'plim':(0.0,10000.),
+		               	   			 'pcolor':'royalblue',
+		               	   			 })
+		# Br. H-beta VOFF
+		mcmc_input['br_Hb_voff'] = ({'name':'br_Hb_voff',
+		               	   		 	 'label':'$\mathrm{VOFF}_{\mathrm{Br.\;Hb}}$',
+		               	   		 	 'init':0.,
+		               	   		 	 'plim':(-1000.,1000.),
+		               	   		 	 'pcolor':'turquoise',
+		               	   		 	 })
+	##############################################################################
+
+	##############################################################################
+
+	#### Narrow Ha/[NII]/[SII] ###################################################
+	if ((fit_narrow==True) and ((((fit_reg[0]+25.) < 6732.67 < (fit_reg[1]-25.))==True))):
+		print(' Fitting narrow Ha/[NII]/[SII] emission.')
+		# Na. [NII]6585 Amp.
+		mcmc_input['nii6585_core_amp'] = ({'name':'nii6585_core_amp',
+		                   				   'label':'$A_\mathrm{[NII]6585\;Core}$',
+		                   				   'init':(ha_amp_init-total_flux_init)*0.75,
+		                   				   'plim':(0.0,max_flux),
+		                   				   'pcolor':'green',
+		                   				   })
+		if (tie_narrow==False):
+			# Na. [NII]6585 FWHM
+			mcmc_input['nii6585_core_fwhm'] = ({'name':'nii6585_core_fwhm',
+			                   					'label':'$\mathrm{FWHM}_\mathrm{[NII]6585\;Core}$',
+			                   					'init':250.,
+			                   					'plim':(0.0,1000.),
+			                   					'pcolor':'limegreen',
+			                   					})
+	
+		# Na. [NII]6585 VOFF
+		mcmc_input['nii6585_core_voff'] = ({'name':'nii6585_core_voff',
+		                   					'label':'$\mathrm{VOFF}_\mathrm{[NII]6585\;Core}$',
+		                   					'init':0.,
+		                   					'plim':(-1000.,1000.),
+		                   					'pcolor':'palegreen',
+		                   					})
+	
+
+		# Na. H-alpha amplitude
+		mcmc_input['na_Ha_amp'] = ({'name':'na_Ha_amp',
+		                   		 	'label':'$A_{\mathrm{Na.\;Ha}}$' ,
+		                   		 	'init':(ha_amp_init-total_flux_init) ,
+		                   		 	'plim':(0.0,max_flux),
+		                   		 	'pcolor':'gold',
+		                   		 	})
+		# Na. H-alpha FWHM tied to [NII]6585 FWHM
+		# Na. H-alpha VOFF
+		mcmc_input['na_Ha_voff'] = ({'name':'na_Ha_voff',
+		                   			 'label':'$\mathrm{VOFF}_{\mathrm{Na.\;Ha}}$',
+		                   			 'init':0.,
+		                   			 'plim':(-1000,1000.),
+		                   			 'pcolor':'yellow',
+		                   			 })
+
+		# Na. [SII]6732 Amp.
+		mcmc_input['sii6732_core_amp'] = ({'name':'sii6732_core_amp',
+		                   				   'label':'$A_\mathrm{[SII]6732\;Core}$',
+		                   				   'init':(sii_amp_init-total_flux_init),
+		                   				   'plim':(0.0,max_flux),
+		                   				   'pcolor':'green',
+		                   				   })
+	
+		# Na. [SII]6732 VOFF
+		mcmc_input['sii6732_core_voff'] = ({'name':'sii6732_core_voff',
+		                   					'label':'$\mathrm{VOFF}_\mathrm{[SII]6732\;Core}$',
+		                   					'init':0.,
+		                   					'plim':(-1000.,1000.),
+		                   					'pcolor':'palegreen',
+		                   					})
+		# Na. [SII]6718 Amp.
+		mcmc_input['sii6718_core_amp'] = ({'name':'sii6718_core_amp',
+		                   				   'label':'$A_\mathrm{[SII]6718\;Core}$',
+		                   				   'init':(sii_amp_init-total_flux_init),
+		                   				   'plim':(0.0,max_flux),
+		                   				   'pcolor':'green',
+		                   				   })
+	#### Ha/[NII]/[SII] Outflows ######################################################
+	if ((fit_narrow==True) and (fit_outflows==True) and ((((fit_reg[0]+25.) < 6732.67 < (fit_reg[1]-25.))==True))):
+		print(' Fitting Ha/[NII]/[SII] outflows.')
+		# Br. [OIII]5007 Outflow amplitude
+		mcmc_input['nii6585_outflow_amp'] = ({'name':'nii6585_outflow_amp',
+		                   					   'label':'$A_\mathrm{[NII]6585\;Outflow}$' ,
+		                   					   'init':(ha_amp_init-total_flux_init)*0.25,
+		                   					   'plim':(0.0,max_flux),
+		                   					   'pcolor':'mediumpurple',
+		                   					   })
+		if (tie_narrow==False):
+			# Br. [OIII]5007 Outflow FWHM
+			mcmc_input['nii6585_outflow_fwhm'] = ({'name':'nii6585_outflow_fwhm',
+			                   						'label':'$\mathrm{FWHM}_\mathrm{[NII]6585\;Outflow}$',
+			                   						'init':450.,
+			                   						'plim':(0.0,2500.),
+			                   						'pcolor':'darkorchid',
+			                   						})
+		# Br. [OIII]5007 Outflow VOFF
+		mcmc_input['nii6585_outflow_voff'] = ({'name':'nii6585_outflow_voff',
+		                   						'label':'$\mathrm{VOFF}_\mathrm{[NII]6585\;Outflow}$',
+		                   						'init':-50.,
+		                   						'plim':(-2000.,2000.),
+		                   						'pcolor':'orchid',
+		                   						})
+		# All components [NII]6585 of outflow are tied to all outflows of the Ha/[NII]/[SII] region
+
+	##############################################################################
+
+	#### Broad Line H-alpha ###########################################################
+
+	if ((fit_broad==True) and ((((fit_reg[0]+25.) < 6732.67 < (fit_reg[1]-25.))==True))):
+		print(' Fitting broadline H-alpha.')
+		# Br. H-alpha amplitude
+		mcmc_input['br_Ha_amp'] = ({'name':'br_Ha_amp',
+		                   			'label':'$A_{\mathrm{Br.\;Ha}}$' ,
+		                   			'init':(ha_amp_init-total_flux_init)/2.0  ,
+		                   			'plim':(0.0,max_flux),
+		                   			'pcolor':'steelblue',
+		                   			})
+		# Br. H-alpha FWHM
+		mcmc_input['br_Ha_fwhm'] = ({'name':'br_Ha_fwhm',
+		               	   			 'label':'$\mathrm{FWHM}_{\mathrm{Br.\;Ha}}$',
+		               	   			 'init':2500.,
+		               	   			 'plim':(0.0,10000.),
+		               	   			 'pcolor':'royalblue',
+		               	   			 })
+		# Br. H-alpha VOFF
+		mcmc_input['br_Ha_voff'] = ({'name':'br_Ha_voff',
+		               	   		 	 'label':'$\mathrm{VOFF}_{\mathrm{Br.\;Ha}}$',
+		               	   		 	 'init':0.,
+		               	   		 	 'plim':(-1000.,1000.),
+		               	   		 	 'pcolor':'turquoise',
+		               	   		 	 }) 
+
+	
+
+	##############################################################################
+
+	##############################################################################
+	
+	# return param_names,param_labels,params,param_limits,param_init,param_colors
+	return mcmc_input
+
+##################################################################################
+
+#### Outflow Test ################################################################
+def outflow_test(lam_gal,galaxy,noise,run_dir,velscale,mcbs_niter):
+	fit_reg = (4400,5800)
+	param_dict = initialize_mcmc(lam_gal,galaxy,fit_reg=fit_reg,fit_type='init',
+	                             fit_feii=True,fit_losvd=True,
+	                             fit_power=False,fit_broad=True,
+	                             fit_narrow=True,fit_outflows=True)
+
+	# for key in param_dict:
+	# 	print key
+	# if 1: sys.exit()
+
+	gal_temp = galaxy_template(lam_gal,age=10)
+	na_feii_temp,br_feii_temp = initialize_feii(lam_gal,velscale,fit_reg)
+
+	# Create mask to mask out parts of spectrum; should speed things up
+	if 1:
+		mask = np.where( (lam_gal > fit_reg[0]) & (lam_gal < fit_reg[1]) )
+		lam_gal       = lam_gal[mask]
+		galaxy        = galaxy[mask]
+		noise         = noise[mask]
+		gal_temp      = gal_temp[mask]
+		na_feii_temp  = na_feii_temp[mask]
+		br_feii_temp  = br_feii_temp[mask]
+
+	rdict,sigma = max_likelihood(param_dict,lam_gal,galaxy,noise,gal_temp,na_feii_temp,br_feii_temp,
+                                        None,None,None,velscale,None,None,run_dir,monte_carlo=True,niter=mcbs_niter)
+
+	
+	for key in rdict:
+		print("          %s = %0.2f +/- %0.2f" % (key, rdict[key]['med'],rdict[key]['std']) )
+	print('          sigma = %0.2f' % sigma)
+
+	# Determine the significance of outflows
+	# Outflow criteria:
+	#	(1) (FWHM_outflow - dFWHM_outflow) > (FWHM_core + dFWHM_core)
+	cond1 = ((rdict['oiii5007_outflow_fwhm']['med']-rdict['oiii5007_outflow_fwhm']['std']) > (rdict['oiii5007_core_fwhm']['med']+rdict['oiii5007_core_fwhm']['std']))
+	if (cond1==True):
+		print('          Outflow FWHM condition: Pass')
+	elif (cond1==False):
+		print('          Outflow FWHM condition: Fail')
+	#	(2) (VOFF_outflow + dVOFF_outflow) < (VOFF_core - dVOFF_core)
+	cond2 = ((rdict['oiii5007_outflow_voff']['med']+rdict['oiii5007_outflow_voff']['std']) < (rdict['oiii5007_core_voff']['med']-rdict['oiii5007_core_voff']['std']))
+	if (cond2==True):
+		print('          Outflow VOFF condition: Pass')
+	elif (cond2==False):
+		print('          Outflow VOFF condition: Fail')
+	#	(3) (AMP_outflow - dAMP_outflow) > sigma
+	cond3 = ((rdict['oiii5007_outflow_amp']['med']-rdict['oiii5007_outflow_amp']['std']) > sigma)
+	if (cond3==True):
+		print('          Outflow amplitude condition: Pass')
+	elif (cond3==False):
+		print('          Outflow amplitude condition: Fail')
+
+	if (all([cond1,cond2,cond3])==True):
+		return True
+	elif (any([cond1,cond2,cond3])==False):
+		return False
+
+##################################################################################
+
+
+#### Maximum Likelihood Fitting ##################################################
+
+def max_likelihood(param_dict,lam_gal,galaxy,noise,gal_temp,na_feii_temp,br_feii_temp,
+				   temp_list,temp_fft,npad,velscale,npix,vsyst,run_dir,
+				   fit_type='init',move_temp=False,output_model=False,
+				   monte_carlo=False,niter=25):
+	
+	# This function performs an initial maximum likelihood
+	# estimation to acquire robust initial parameters.
+	param_names  = [param_dict[key]['name'] for key in param_dict ]
+	params       = [param_dict[key]['init'] for key in param_dict ]
+	bounds       = [param_dict[key]['plim'] for key in param_dict ]
+
+	# for i in range(0,len(params),1):
+	# 	print param_names[i], params[i], bounds[i]
+	# if 1: sys.exit()
+
+	# Constraints for Outflow components
+	def oiii_amp_constraint(p):
+		# (core_amp >= outflow_amp) OR (core_amp - outflow_amp >= 0)
+	    return p[param_names.index('oiii5007_core_amp')]-p[param_names.index('oiii5007_outflow_amp')]
+
+	def oiii_fwhm_constraint(p):
+		# (outflow_fwhm >= core_fwhm) OR (outflow_fwhm - core_fwhm >= 0)
+		return p[param_names.index('oiii5007_outflow_fwhm')]-p[param_names.index('oiii5007_core_fwhm')]
+	def oiii_voff_constraint(p):
+		# (core_voff >= outflow_voff) OR (core_voff - outflow_voff >= 0)
+	    return p[param_names.index('oiii5007_core_voff')]-p[param_names.index('oiii5007_outflow_voff')]
+	def nii_amp_constraint(p):
+		# (core_amp >= outflow_amp) OR (core_amp - outflow_amp >= 0)
+	    return p[param_names.index('nii6585_core_amp')]-p[param_names.index('nii6585_outflow_amp')]
+	def nii_fwhm_constraint(p):
+		# (outflow_fwhm >= core_fwhm) OR (outflow_fwhm - core_fwhm >= 0)
+		return p[param_names.index('nii6585_outflow_fwhm')]-p[param_names.index('nii6585_core_fwhm')]
+	def nii_voff_constraint(p):
+		# (core_voff >= outflow_voff) OR (core_voff - outflow_voff >= 0)
+	    return p[param_names.index('nii6585_core_voff')]-p[param_names.index('nii6585_outflow_voff')]
+
+	cons1 = [{'type':'ineq','fun': oiii_amp_constraint  },
+	         {'type':'ineq','fun': oiii_fwhm_constraint },
+	         {'type':'ineq','fun': oiii_voff_constraint }]
+
+	cons2 = [{'type':'ineq','fun': nii_amp_constraint   },
+	         {'type':'ineq','fun': nii_fwhm_constraint  },
+	         {'type':'ineq','fun': nii_voff_constraint  }]
+	
+	cons3 = [{'type':'ineq','fun': oiii_amp_constraint  },
+	         {'type':'ineq','fun': oiii_fwhm_constraint },
+	         {'type':'ineq','fun': oiii_voff_constraint },
+	         {'type':'ineq','fun': nii_amp_constraint   },
+	         {'type':'ineq','fun': nii_fwhm_constraint  },
+	         {'type':'ineq','fun': nii_voff_constraint  }]
+
+	# Perform maximum likelihood estimation for initial guesses of MCMC fit
+	# If model includes narrow lines and outflows
+	
+	if (all(comp in param_names for comp in ['oiii5007_core_amp','oiii5007_core_fwhm','oiii5007_core_voff',
+											 'oiii5007_outflow_amp','oiii5007_outflow_fwhm','oiii5007_outflow_voff'])==True) and \
+	   (all(comp in param_names for comp in ['nii6585_core_amp','nii6585_core_fwhm','nii6585_core_voff',
+	   										 'na_Ha_amp','na_Ha_voff',
+	   										 'sii6732_core_amp','sii6732_core_voff','sii6718_core_amp',
+	   										 'nii6585_outflow_amp','nii6585_outflow_fwhm','nii6585_outflow_voff'])==False):
+		print('\n Performing max. likelihood fitting.  Constraining outflow components for Hb/[OIII] region...\n ')
+		start_time = time.time()
+		nll = lambda *args: -lnlike(*args)
+		result = op.minimize(fun = nll, x0 = params, \
+		     				 args=(param_names,lam_gal,galaxy,noise,gal_temp,na_feii_temp,br_feii_temp,
+		     				 	   temp_list,temp_fft,npad,velscale,npix,vsyst,run_dir,
+		     				 	   fit_type,move_temp,output_model),\
+		     				 method='SLSQP', bounds = bounds, constraints=cons1, options={'ftol':1.0e-10,'maxiter':10000,'disp': True})
+
+	elif (all(comp in param_names for comp in ['oiii5007_core_amp','oiii5007_core_fwhm','oiii5007_core_voff',
+											 'oiii5007_outflow_amp','oiii5007_outflow_fwhm','oiii5007_outflow_voff'])==False) and \
+	     (all(comp in param_names for comp in ['nii6585_core_amp','nii6585_core_fwhm','nii6585_core_voff',
+	   										 'na_Ha_amp','na_Ha_voff',
+	   										 'sii6732_core_amp','sii6732_core_voff','sii6718_core_amp',
+	   										 'nii6585_outflow_amp','nii6585_outflow_fwhm','nii6585_outflow_voff'])==True):
+		print('\n Performing max. likelihood fitting.  Constraining outflow components for Ha/[NII]/[SII] region...\n ')
+		start_time = time.time()
+		nll = lambda *args: -lnlike(*args)
+		result = op.minimize(fun = nll, x0 = params, \
+		     				 args=(param_names,lam_gal,galaxy,noise,gal_temp,na_feii_temp,br_feii_temp,
+		     				 	   temp_list,temp_fft,npad,velscale,npix,vsyst,run_dir,
+		     				 	   fit_type,move_temp,output_model),\
+		     				 method='SLSQP', bounds = bounds, constraints=cons2, options={'ftol':1.0e-10,'maxiter':10000,'disp': True})
+
+
+	elif (all(comp in param_names for comp in ['oiii5007_core_amp','oiii5007_core_fwhm','oiii5007_core_voff',
+												  'oiii5007_outflow_amp','oiii5007_outflow_fwhm','oiii5007_outflow_voff',
+												  'nii6585_core_amp','nii6585_core_fwhm','nii6585_core_voff',
+												  'na_Ha_amp','na_Ha_voff',
+												  'sii6732_core_amp','sii6732_core_voff',
+												  'sii6718_core_amp',
+												  'nii6585_outflow_amp','nii6585_outflow_fwhm','nii6585_outflow_voff'])==True):
+		print('\n Performing max. likelihood fitting.  Constraining outflow components for Hb/[OIII] and Ha/[NII]/[SII] regions...\n ')
+		start_time = time.time()
+		nll = lambda *args: -lnlike(*args)
+		result = op.minimize(fun = nll, x0 = params, \
+		     				 args=(param_names,lam_gal,galaxy,noise,gal_temp,na_feii_temp,br_feii_temp,
+		     				 	   temp_list,temp_fft,npad,velscale,npix,vsyst,run_dir,
+		     				 	   fit_type,move_temp,output_model),\
+		     				 method='SLSQP', bounds = bounds, constraints=cons3, options={'ftol':1.0e-10,'maxiter':10000,'disp': True})
+
+
+
+
+	elif all(comp in param_names for comp in ['oiii5007_core_amp','oiii5007_core_fwhm','oiii5007_core_voff','oiii5007_outflow_amp','oiii5007_outflow_fwhm','oiii5007_outflow_voff'])==False:
+		print('\n Not fitting outflow components...\n ')
+		start_time = time.time()
+		nll = lambda *args: -lnlike(*args)
+		result = op.minimize(fun = nll, x0 = params, \
+		     				 args=(param_names,lam_gal,galaxy,noise,gal_temp,na_feii_temp,br_feii_temp,
+		     				 	   temp_list,temp_fft,npad,velscale,npix,vsyst,run_dir,
+		     				 	   fit_type,move_temp,output_model),\
+		     				 method='SLSQP', bounds = bounds, options={'maxiter':10000,'disp': True})
+	elap_time = (time.time() - start_time)
+
+
+	if 1: # Set to 1 to plot and stop
+		print result['x']
+		output_model = True
+		pdict = {}
+		comp_dict = fit_model(result['x'],param_names,
+				              lam_gal,galaxy,noise,gal_temp,na_feii_temp,br_feii_temp,
+				              temp_list,temp_fft,npad,velscale,npix,vsyst,run_dir,
+				              fit_type,move_temp,output_model)
+
+		# for k in range(0,len(param_names),1):
+		# 	print(' %s = %0.2f' % (param_names[k],result['x'][k]) )
+
+
+		# return result
+
+	# if 1:sys.exit()
+
+	###### Monte Carlo Simulate for Outflows ###############################################################
+
+	if ((monte_carlo==True) ):
+		
+		par_best     = result['x']
+		fit_type     = 'monte_carlo'
+		move_temp    = False
+		output_model = False
+
+		# for i,name in enumerate(param_names): print name,par_best[i]
+
+		comp_dict = fit_model(par_best,param_names,lam_gal,galaxy,noise,gal_temp,na_feii_temp,br_feii_temp,
+							  temp_list,temp_fft,npad,velscale,npix,vsyst,run_dir,
+							  fit_type,move_temp,output_model)
+	
+		# Compute the total standard deviation at each pixel 
+		# To take into account the uncertainty of the model, we compute the median absolute deviation of
+		# the residuals from the initial fit, and add it in quadrature to the per-pixel standard deviation
+		# of the sdss spectra.
+		model_std = mad_std(comp_dict['residuals']['comp'])
+	
+		sigma = np.sqrt(mad_std(noise)**2 + model_std**2)
+		# print('sigma = %0.4f' % (sigma) )
+
+		model = comp_dict['model']['comp']
+		# data  = comp_dict['data']['comp']
+
+		# Iteratively box-car smooth until
+		# fig = plt.figure(figsize=(14,6))
+		# ax1 = fig.add_subplot(1,1,1)
+		# ax1.plot(lam_gal,data,color='white',linewidth=0.5)
+
+		# from astropy.convolution import convolve, Box1DKernel, Gaussian1DKernel
+		# model = convolve(data, Box1DKernel(3))
+		# ax1.plot(lam_gal,convolve(data, Box1DKernel(3)),linewidth=0.5,label=r'kernel = $1\sigma$')
+
+		# ax1.legend()
+		# plt.savefig(run_dir+'smooth_test.pdf',fmt='pdf',dpi=300)
+
+		# if 1: sys.exit()
+
+		mcpars = np.empty((len(par_best), niter)) # stores best-fit parameters of each MC iteration
+	
+		
+
+		if (na_feii_temp is None) or (br_feii_temp is None):
+			na_feii_temp = np.full_like(lam_gal,0)
+			br_feii_temp = np.full_like(lam_gal,0)
+
+
+		print( '\n Performing Monte Carlo resampling to determine if outflows are present...')
+		print( '\n       Approximate time for %d iterations: %s \n' % (niter,time_convert(elap_time*niter))  )
+		for n in range(0,niter,1):
+			print('       Completed %d of %d iterations.' % (n+1,niter) )
+			# Generate an array of random normally distributed data using sigma
+			rand  = np.random.normal(0.0,sigma,len(lam_gal))
+	
+			mcgal = model + rand
+			fit_type     = 'init'
+			move_temp    = False
+			output_model = False
+
+			if all(comp in param_names for comp in ['oiii5007_core_amp','oiii5007_core_fwhm','oiii5007_core_voff','oiii5007_outflow_amp','oiii5007_outflow_fwhm','oiii5007_outflow_voff'])==True:
+
+				nll = lambda *args: -lnlike(*args)
+				resultmc = op.minimize(fun = nll, x0 = params, \
+	         				 		 args=(param_names,lam_gal,mcgal,noise,gal_temp,na_feii_temp,br_feii_temp,
+	         				 	   		   temp_list,temp_fft,npad,velscale,npix,vsyst,run_dir,
+	         				 	   		   fit_type,move_temp,output_model),\
+	         				 		 method='SLSQP', bounds = bounds, constraints=cons1, options={'maxiter':10000,'disp': False})
+
+			elif all(comp in param_names for comp in ['oiii5007_core_amp','oiii5007_core_fwhm','oiii5007_core_voff','oiii5007_outflow_amp','oiii5007_outflow_fwhm','oiii5007_outflow_voff'])==False:
+
+				nll = lambda *args: -lnlike(*args)
+				resultmc = op.minimize(fun = nll, x0 = params, \
+	         				 		 args=(param_names,lam_gal,mcgal,noise,gal_temp,na_feii_temp,br_feii_temp,
+	         				 	   		   temp_list,temp_fft,npad,velscale,npix,vsyst,run_dir,
+	         				 	   		   fit_type,move_temp,output_model),\
+	         				 		 method='SLSQP', bounds = bounds, options={'maxiter':10000,'disp': False})
+			mcpars[:,n] = resultmc['x']
+	
+			# For testing: plots every max. likelihood iteration
+			if 0:
+				output_model = True
+				fit_model(resultmc['x'],param_names,lam_gal,mcgal,noise,gal_temp,na_feii_temp,br_feii_temp,
+			  			  temp_list,temp_fft,npad,velscale,npix,vsyst,run_dir,
+			  			  fit_type,move_temp,output_model)
+	
+		# create dictionary of param names, means, and standard deviations
+		mc_med = np.median(mcpars,axis=1)
+		mc_std = mad_std(mcpars,axis=1)
+		pdict = {}
+		for k in range(0,len(param_names),1):
+			pdict[param_names[k]] = {'med':mc_med[k],'std':mc_std[k]}
+		
+		# for key in pdict:
+		# 	print('    %s =  %0.2f  +/-  %0.2f ' % (key,pdict[key]['med'],pdict[key]['std']) )
+
+		if 1:
+			output_model = True
+			comp_dict = fit_model([pdict[key]['med'] for key in pdict],pdict.keys(),
+					              lam_gal,galaxy,noise,gal_temp,na_feii_temp,br_feii_temp,
+					              temp_list,temp_fft,npad,velscale,npix,vsyst,run_dir,
+					              fit_type,move_temp,output_model)
+			plt.savefig(run_dir+'outflow_mcbs.pdf',fmt='pdf',dpi=150)
+	
+		# Outflow determination and LOSVD for final model: 
+		# determine if the object has outflows and if stellar velocity dispersion should be fit
+
+		return pdict, sigma
+
+	elif (monte_carlo==False):
+		pdict = {}
+		for k in range(0,len(param_names),1):
+			pdict[param_names[k]] = {'res':result['x'][k]}
+		return pdict
+
+
+#### Likelihood function #########################################################
+
+# Maximum Likelihood (initial fitting), Prior, and log Probability functions
+def lnlike(params,param_names,lam_gal,galaxy,noise,gal_temp,na_feii_temp,br_feii_temp,
+		   temp_list,temp_fft,npad,velscale,npix,vsyst,run_dir,
+		   fit_type,move_temp,output_model):
+
+	# Create model
+	model = fit_model(params,param_names,lam_gal,galaxy,noise,gal_temp,na_feii_temp,br_feii_temp,
+					  temp_list,temp_fft,npad,velscale,npix,vsyst,run_dir,
+					  fit_type,move_temp,output_model)
+	# Calculate log-likelihood
+	l = -0.5*(galaxy-model)**2/(noise)**2
+	l = np.sum(l,axis=0)
+	return l
+
+##################################################################################
+
+#### Priors ######################################################################
+
+def lnprior(params,param_names,bounds):
+
+	lower_lim = []
+	upper_lim = []
+	for i in range(0,len(bounds),1):
+		lower_lim.append(bounds[i][0])
+		upper_lim.append(bounds[i][1])
+
+	# print bounds
+	# print lower_lim
+	# print upper_lim
+
+	pdict = {}
+	for k in range(0,len(param_names),1):
+			pdict[param_names[k]] = {'p':params[k]}
+
+	# print pdict
+
+	# if 1: sys.exit()
+
+	if (all(comp in param_names for comp in ['oiii5007_core_amp','oiii5007_core_fwhm','oiii5007_core_voff',
+											 'oiii5007_outflow_amp','oiii5007_outflow_fwhm','oiii5007_outflow_voff'])==True) and \
+	   (all(comp in param_names for comp in ['nii6585_core_amp','nii6585_core_fwhm','nii6585_core_voff',
+	   										 'na_Ha_amp','na_Ha_voff',
+	   										 'sii6732_core_amp','sii6732_core_voff','sii6718_core_amp',
+	   										 'nii6585_outflow_amp','nii6585_outflow_fwhm','nii6585_outflow_voff'])==False):
+		# (core_amp >= outflow_amp)
+		# (outflow_fwhm >= core_fwhm)
+		# (core_voff >= outflow_voff)
+		if np.all((params >= lower_lim) & (params <= upper_lim)) & \
+		    (pdict['oiii5007_core_amp']['p'] >= pdict['oiii5007_outflow_amp']['p']) & \
+		    (pdict['oiii5007_outflow_fwhm']['p'] >= pdict['oiii5007_core_fwhm']['p']) & \
+		    (pdict['oiii5007_core_voff']['p'] >= pdict['oiii5007_outflow_voff']['p']):
+		    return 0.0
+		else: return -np.inf
+	elif (all(comp in param_names for comp in ['oiii5007_core_amp','oiii5007_core_fwhm','oiii5007_core_voff',
+												 'oiii5007_outflow_amp','oiii5007_outflow_fwhm','oiii5007_outflow_voff'])==False) and \
+		   (all(comp in param_names for comp in ['nii6585_core_amp','nii6585_core_fwhm','nii6585_core_voff',
+		   										 'na_Ha_amp','na_Ha_voff',
+		   										 'sii6732_core_amp','sii6732_core_voff','sii6718_core_amp',
+		   										 'nii6585_outflow_amp','nii6585_outflow_fwhm','nii6585_outflow_voff'])==True):
+		# (core_amp >= outflow_amp)
+		# (outflow_fwhm >= core_fwhm)
+		# (core_voff >= outflow_voff)
+		if np.all((params >= lower_lim) & (params <= upper_lim)) & \
+			(pdict['nii6585_core_amp']['p'] >= pdict['nii6585_outflow_amp']['p']) & \
+			(pdict['nii6585_outflow_fwhm']['p'] >= pdict['nii6585_core_fwhm']['p']) & \
+			(pdict['nii6585_core_voff']['p'] >= pdict['nii6585_outflow_voff']['p']):
+			return 0.0
+		else: return -np.inf
+	elif (all(comp in param_names for comp in ['oiii5007_core_amp','oiii5007_core_fwhm','oiii5007_core_voff',
+													  'oiii5007_outflow_amp','oiii5007_outflow_fwhm','oiii5007_outflow_voff',
+													  'nii6585_core_amp','nii6585_core_fwhm','nii6585_core_voff',
+													  'na_Ha_amp','na_Ha_voff',
+													  'sii6732_core_amp','sii6732_core_voff',
+													  'sii6718_core_amp',
+													  'nii6585_outflow_amp','nii6585_outflow_fwhm','nii6585_outflow_voff'])==True):
+		if np.all((params >= lower_lim) & (params <= upper_lim)) & \
+		    (pdict['oiii5007_core_amp']['p'] >= pdict['oiii5007_outflow_amp']['p']) & \
+		    (pdict['oiii5007_outflow_fwhm']['p'] >= pdict['oiii5007_core_fwhm']['p']) & \
+		    (pdict['oiii5007_core_voff']['p'] >= pdict['oiii5007_outflow_voff']['p']) & \
+		    (pdict['nii6585_core_amp']['p'] >= pdict['nii6585_outflow_amp']['p']) & \
+			(pdict['nii6585_outflow_fwhm']['p'] >= pdict['nii6585_core_fwhm']['p']) & \
+			(pdict['nii6585_core_voff']['p'] >= pdict['nii6585_outflow_voff']['p']):
+			return 0.0
+		else: return -np.inf
+	elif all(comp in param_names for comp in ['oiii5007_core_amp','oiii5007_core_fwhm','oiii5007_core_voff',
+											  'oiii5007_outflow_amp','oiii5007_outflow_fwhm','oiii5007_outflow_voff'])==False:
+		if np.all((params >= lower_lim) & (params <= upper_lim)):
+			return 0.0
+		else: return -np.inf
+
+##################################################################################
+
+##################################################################################
+
+def lnprob(params,param_names,bounds,lam_gal,galaxy,noise,gal_temp,na_feii_temp,br_feii_temp,
+		   temp_list,temp_fft,npad,velscale,npix,vsyst,run_dir):
+	# lnprob (params,args)
+
+	lp = lnprior(params,param_names,bounds)
+
+	if not np.isfinite(lp):
+		return -np.inf
+	elif (np.isfinite(lp)==True):
+		fit_type     = 'final'
+		move_temp    = True
+		output_model = False
+		return lp + lnlike(params,param_names,lam_gal,galaxy,noise,gal_temp,na_feii_temp,br_feii_temp,
+		   					temp_list,temp_fft,npad,velscale,npix,vsyst,run_dir,
+		   					fit_type,move_temp,output_model)
+
+####################################################################################
+
+
+
+
+#### Model Function ##############################################################
+
+def fit_model(params,param_names,lam_gal,galaxy,noise,gal_temp,na_feii_temp,br_feii_temp,
+			  temp_list,temp_fft,npad,velscale,npix,vsyst,run_dir,
+			  fit_type,move_temp,output_model):
+
+
+	"""
+	Constructs galaxy model by convolving templates with a LOSVD given by 
+	a specified set of velocity parameters. 
+	
+	Parameters:
+	    pars: parameters of Markov-chain
+	    lam_gal: wavelength vector used for continuum model
+	    temp_fft: the Fourier-transformed templates
+	    npad: 
+	    velscale: the velocity scale in km/s/pixel
+	    npix: number of output pixels; must be same as galaxy
+	    vsyst: dv; the systematic velocity fr
+	"""
+
+	# Construct dictionary of parameter names and their respective parameter values
+	# param_names  = [param_dict[key]['name'] for key in param_dict ]
+	# params       = [param_dict[key]['init'] for key in param_dict ]
+	keys = param_names
+	values = params
+	p = dict(zip(keys, values))
+	# if 1: sys.exit()
+	# print p
+	c = 299792.458 # speed of light
+	host_model = np.copy(galaxy)
+	comp_dict  = {} 
+
+	############################# Power-law Component ######################################################
+
+	if all(comp in param_names for comp in ['power_amp','power_slope','power_kink'])==True:
+		# print p['power_slope'],p['power_amp']
+		# Create a template model for the power-law continuum
+		power = simple_power_law(lam_gal,p['power_amp'],p['power_slope'],p['power_kink']) # ind 2 = alpha, ind 3 = amplitude
+		host_model = (host_model) - (power) # Subtract off continuum from galaxy, since we only want template weights to be fit
+		comp_dict['power'] = {'comp':power,'pcolor':'xkcd:orange red','linewidth':0.5}
+
+	########################################################################################################
+
+    ############################# Fe II Component ##########################################################
+
+	if all(comp in param_names for comp in ['na_feii_amp','br_feii_amp'])==True:
+
+		# Create template model for narrow and broad FeII emission 
+		na_feii_amp  = p['na_feii_amp']
+		br_feii_amp  = p['br_feii_amp']
+		
+		na_feii_template = na_feii_amp*na_feii_temp
+		br_feii_template = br_feii_amp*br_feii_temp
+		
+		# If including FeII templates, initialize them here
+		 
+		host_model = (host_model) - (na_feii_template) - (br_feii_template)
+		comp_dict['na_feii_template'] = {'comp':na_feii_template,'pcolor':'xkcd:deep red','linewidth':0.5}
+		comp_dict['br_feii_template'] = {'comp':br_feii_template,'pcolor':'xkcd:bright orange','linewidth':0.5}
+
+    ########################################################################################################
+
+    ############################# Emission Line Components #################################################    
+
+
+    # Narrow lines 
+
+	#### Jenna's Lines #################################################################################
+	if all(comp in param_names for comp in ['na_oi_6300_amp','na_oi_6300_fwhm','na_oi_6300_voff',
+											'na_fevii_5722_amp','na_fevii_5722_fwhm','na_fevii_5722_voff',
+											'na_fevii_6085_amp','na_fevii_6085_fwhm','na_fevii_6085_voff'])==True:
+		# Narrow [OI]6300
+		na_oi6300_core_center = 6302.046 # Angstroms
+		na_oi6300_core_amp    = p['na_oi_6300_amp'] # flux units
+		na_oi6300_core_fwhm   = np.sqrt(p['na_oi_6300_fwhm']**2+(2.355*velscale)**2) # km/s
+		na_oi6300_core_voff   = p['na_oi_6300_voff']  # km/s
+		na_oi6300_core   = gaussian(lam_gal,na_oi6300_core_center,na_oi6300_core_amp,na_oi6300_core_fwhm,na_oi6300_core_voff,velscale)
+		host_model         = host_model - na_oi6300_core
+		comp_dict['na_oi6300_core'] = {'comp':na_oi6300_core,'pcolor':'xkcd:dodger blue','linewidth':0.5}
+		# Narrow [FeVII]5722
+		na_fevii5722_core_center = 5722.000 # Angstroms
+		na_fevii5722_core_amp    = p['na_fevii_5722_amp'] # flux units
+		na_fevii5722_core_fwhm   = np.sqrt(p['na_fevii_5722_fwhm']**2+(2.355*velscale)**2) # km/s
+		na_fevii5722_core_voff   = p['na_fevii_5722_voff']  # km/s
+		na_fevii5722_core   = gaussian(lam_gal,na_fevii5722_core_center,na_fevii5722_core_amp,na_fevii5722_core_fwhm,na_fevii5722_core_voff,velscale)
+		host_model         = host_model - na_fevii5722_core
+		comp_dict['na_fevii5722_core'] = {'comp':na_fevii5722_core,'pcolor':'xkcd:dodger blue','linewidth':0.5}
+		# Narrow [FeVII]6085
+		na_fevii6085_core_center = 6085.000 # Angstroms
+		na_fevii6085_core_amp    = p['na_fevii_6085_amp'] # flux units
+		na_fevii6085_core_fwhm   = np.sqrt(p['na_fevii_6085_fwhm']**2+(2.355*velscale)**2) # km/s
+		na_fevii6085_core_voff   = p['na_fevii_6085_voff']  # km/s
+		na_fevii6085_core   = gaussian(lam_gal,na_fevii6085_core_center,na_fevii6085_core_amp,na_fevii6085_core_fwhm,na_fevii6085_core_voff,velscale)
+		host_model         = host_model - na_fevii6085_core
+		comp_dict['na_fevii6085_core'] = {'comp':na_fevii6085_core,'pcolor':'xkcd:dodger blue','linewidth':0.5}
+
+	####################################################################################################
+
+    #### [OII]3727,3729 #################################################################################
+	if all(comp in param_names for comp in ['na_oii3727_core_amp','na_oii3727_core_fwhm','na_oii3727_core_voff','na_oii3729_core_amp'])==True:
+		# Narrow [OII]3727
+		na_oii3727_core_center = 3727.092 # Angstroms
+		na_oii3727_core_amp    = p['na_oii3727_core_amp'] # flux units
+		na_oii3727_core_fwhm   = np.sqrt(p['na_oii3727_core_fwhm']**2+(2.355*velscale)**2) # km/s
+		na_oii3727_core_voff   = p['na_oii3727_core_voff']  # km/s
+		na_oii3727_core   = gaussian(lam_gal,na_oii3727_core_center,na_oii3727_core_amp,na_oii3727_core_fwhm,na_oii3727_core_voff,velscale)
+		host_model         = host_model - na_oii3727_core
+		comp_dict['na_oii3727_core'] = {'comp':na_oii3727_core,'pcolor':'xkcd:dodger blue','linewidth':0.5}
+		# Narrow [OII]3729
+		na_oii3729_core_center = 3729.875 # Angstroms
+		na_oii3729_core_amp    = p['na_oii3729_core_amp'] # flux units
+		na_oii3729_core_fwhm   = na_oii3727_core_fwhm # km/s
+		na_oii3729_core_voff   = na_oii3727_core_voff  # km/s
+		na_oii3729_core   = gaussian(lam_gal,na_oii3729_core_center,na_oii3729_core_amp,na_oii3729_core_fwhm,na_oii3729_core_voff,velscale)
+		host_model         = host_model - na_oii3729_core
+		comp_dict['na_oii3729_core'] = {'comp':na_oii3729_core,'pcolor':'xkcd:dodger blue','linewidth':0.5}
+	elif all(comp in param_names for comp in ['na_oii3727_core_amp','na_oii3727_core_voff','na_oii3729_core_amp'])==True:
+		# Narrow [OII]3727
+		na_oii3727_core_center = 3727.092 # Angstroms
+		na_oii3727_core_amp    = p['na_oii3727_core_amp'] # flux units
+		na_oii3727_core_fwhm   = np.sqrt(p['oiii5007_core_fwhm']**2+(2.355*velscale)**2) # km/s
+		na_oii3727_core_voff   = p['na_oii3727_core_voff']  # km/s
+		na_oii3727_core   = gaussian(lam_gal,na_oii3727_core_center,na_oii3727_core_amp,na_oii3727_core_fwhm,na_oii3727_core_voff,velscale)
+		host_model         = host_model - na_oii3727_core
+		comp_dict['na_oii3727_core'] = {'comp':na_oii3727_core,'pcolor':'xkcd:dodger blue','linewidth':0.5}
+		# Narrow [OII]3729
+		na_oii3729_core_center = 3729.875 # Angstroms
+		na_oii3729_core_amp    = p['na_oii3729_core_amp'] # flux units
+		na_oii3729_core_fwhm   = np.sqrt(p['oiii5007_core_fwhm']**2+(2.355*velscale)**2) # km/s
+		na_oii3729_core_voff   = na_oii3727_core_voff  # km/s
+		na_oii3729_core        = gaussian(lam_gal,na_oii3729_core_center,na_oii3729_core_amp,na_oii3729_core_fwhm,na_oii3729_core_voff,velscale)
+		host_model             = host_model - na_oii3729_core
+		comp_dict['na_oii3729_core'] = {'comp':na_oii3729_core,'pcolor':'xkcd:dodger blue','linewidth':0.5}
+    #### [NeIII]3870 #################################################################################
+	if all(comp in param_names for comp in ['na_neiii_core_amp','na_neiii_core_fwhm','na_neiii_core_voff'])==True:
+		# Narrow H-gamma
+		na_neiii_core_center = 3869.810 # Angstroms
+		na_neiii_core_amp    = p['na_neiii_core_amp'] # flux units
+		na_neiii_core_fwhm   = np.sqrt(p['na_neiii_core_fwhm']**2+(2.355*velscale)**2) # km/s
+		na_neiii_core_voff   = p['na_neiii_core_voff']  # km/s
+		na_neiii_core        = gaussian(lam_gal,na_neiii_core_center,na_neiii_core_amp,na_neiii_core_fwhm,na_neiii_core_voff,velscale)
+		host_model           = host_model - na_neiii_core
+		comp_dict['na_neiii_core'] = {'comp':na_neiii_core,'pcolor':'xkcd:dodger blue','linewidth':0.5}
+	elif all(comp in param_names for comp in ['na_neiii_core_amp','na_neiii_core_voff'])==True:
+		# Narrow H-gamma
+		na_neiii_core_center = 3869.810 # Angstroms
+		na_neiii_core_amp    = p['na_neiii_core_amp'] # flux units
+		na_neiii_core_fwhm   = np.sqrt(p['oiii5007_core_fwhm']**2+(2.355*velscale)**2) # km/s
+		na_neiii_core_voff   = p['na_neiii_core_voff']  # km/s
+		na_neiii_core        = gaussian(lam_gal,na_neiii_core_center,na_neiii_core_amp,na_neiii_core_fwhm,na_neiii_core_voff,velscale)
+		host_model           = host_model - na_neiii_core
+		comp_dict['na_neiii_core'] = {'comp':na_neiii_core,'pcolor':'xkcd:dodger blue','linewidth':0.5}
+    #### H-delta #####################################################################################
+	if all(comp in param_names for comp in ['na_Hd_amp','na_Hd_fwhm','na_Hd_voff'])==True:
+		# Narrow H-gamma
+		na_hd_center = 4102.890 # Angstroms
+		na_hd_amp    = p['na_Hd_amp'] # flux units
+		na_hd_fwhm   = np.sqrt(p['na_Hd_fwhm']**2+(2.355*velscale)**2) # km/s
+		na_hd_voff   = p['na_Hd_voff']  # km/s
+		na_Hd_core   = gaussian(lam_gal,na_hd_center,na_hd_amp,na_hd_fwhm,na_hd_voff,velscale)
+		host_model   = host_model - na_Hd_core
+		comp_dict['na_Hd_core'] = {'comp':na_Hd_core,'pcolor':'xkcd:dodger blue','linewidth':0.5}
+	elif all(comp in param_names for comp in ['na_Hd_amp','na_Hd_voff'])==True:
+		# Narrow H-gamma
+		na_hd_center = 4102.890 # Angstroms
+		na_hd_amp    = p['na_Hd_amp'] # flux units
+		na_hd_fwhm   = np.sqrt(p['oiii5007_core_fwhm']**2+(2.355*velscale)**2) # km/s
+		na_hd_voff   = p['na_Hd_voff']  # km/s
+		na_Hd_core   = gaussian(lam_gal,na_hd_center,na_hd_amp,na_hd_fwhm,na_hd_voff,velscale)
+		host_model   = host_model - na_Hd_core
+		comp_dict['na_Hd_core'] = {'comp':na_Hd_core,'pcolor':'xkcd:dodger blue','linewidth':0.5}
+    #### H-gamma/[OIII]4363 ##########################################################################
+	if all(comp in param_names for comp in ['na_Hg_amp','na_Hg_fwhm','na_Hg_voff','oiii4363_core_amp','oiii4363_core_fwhm','oiii4363_core_voff'])==True:
+		# Narrow H-gamma
+		na_hg_center = 4341.680 # Angstroms
+		na_hg_amp    = p['na_Hg_amp'] # flux units
+		na_hg_fwhm   = np.sqrt(p['na_Hg_fwhm']**2+(2.355*velscale)**2) # km/s
+		na_hg_voff   = p['na_Hg_voff']  # km/s
+		na_Hg_core   = gaussian(lam_gal,na_hg_center,na_hg_amp,na_hg_fwhm,na_hg_voff,velscale)
+		host_model   = host_model - na_Hg_core
+		comp_dict['na_Hg_core'] = {'comp':na_Hg_core,'pcolor':'xkcd:dodger blue','linewidth':0.5}
+		# Narrow [OIII]4363 core
+		na_oiii4363_center = 4364.436 # Angstroms
+		na_oiii4363_amp    =  p['oiii4363_core_amp'] # flux units
+		na_oiii4363_fwhm   =  np.sqrt(p['oiii4363_core_fwhm']**2+(2.355*velscale)**2) # km/s
+		na_oiii4363_voff   =  p['oiii4363_core_voff'] # km/s
+		na_oiii4363_core   = gaussian(lam_gal,na_oiii4363_center,na_oiii4363_amp,na_oiii4363_fwhm,na_oiii4363_voff,velscale)
+		host_model         = host_model - na_oiii4363_core
+		comp_dict['na_oiii4363_core'] = {'comp':na_oiii4363_core,'pcolor':'xkcd:dodger blue','linewidth':0.5}
+	elif all(comp in param_names for comp in ['na_Hg_amp','na_Hg_voff','oiii4363_core_amp','oiii4363_core_voff'])==True:
+		# Narrow H-gamma
+		na_hg_center = 4341.680 # Angstroms
+		na_hg_amp    = p['na_Hg_amp'] # flux units
+		na_hg_fwhm   = np.sqrt(p['oiii5007_core_fwhm']**2+(2.355*velscale)**2) # km/s
+		na_hg_voff   = p['na_Hg_voff']  # km/s
+		na_Hg_core   = gaussian(lam_gal,na_hg_center,na_hg_amp,na_hg_fwhm,na_hg_voff,velscale)
+		host_model   = host_model - na_Hg_core
+		comp_dict['na_Hg_core'] = {'comp':na_Hg_core,'pcolor':'xkcd:dodger blue','linewidth':0.5}
+		# Narrow [OIII]4363 core
+		na_oiii4363_center = 4364.436 # Angstroms
+		na_oiii4363_amp    =  p['oiii4363_core_amp'] # flux units
+		na_oiii4363_fwhm   =  np.sqrt(p['oiii5007_core_fwhm']**2+(2.355*velscale)**2) # km/s
+		na_oiii4363_voff   =  p['oiii4363_core_voff'] # km/s
+		na_oiii4363_core   = gaussian(lam_gal,na_oiii4363_center,na_oiii4363_amp,na_oiii4363_fwhm,na_oiii4363_voff,velscale)
+		host_model         = host_model - na_oiii4363_core
+		comp_dict['na_oiii4363_core'] = {'comp':na_oiii4363_core,'pcolor':'xkcd:dodger blue','linewidth':0.5}
+    #### H-beta/[OIII] #########################################################################################
+	if all(comp in param_names for comp in ['oiii5007_core_amp','oiii5007_core_fwhm','oiii5007_core_voff',
+											'na_Hb_amp','na_Hb_voff'])==True:
+		# Narrow [OIII]5007 Core
+		na_oiii5007_center = 5008.240 # Angstroms
+		na_oiii5007_amp    = p['oiii5007_core_amp'] # flux units
+		na_oiii5007_fwhm   = np.sqrt(p['oiii5007_core_fwhm']**2+(2.355*velscale)**2) # km/s
+		na_oiii5007_voff   = p['oiii5007_core_voff']  # km/s
+		na_oiii5007_core   = gaussian(lam_gal,na_oiii5007_center,na_oiii5007_amp,na_oiii5007_fwhm,na_oiii5007_voff,velscale)
+		host_model         = host_model - na_oiii5007_core
+		comp_dict['na_oiii5007_core'] = {'comp':na_oiii5007_core,'pcolor':'xkcd:dodger blue','linewidth':0.5}
+    	# Narrow [OIII]4959 Core
+		na_oiii4959_center = 4960.295 # Angstroms
+		na_oiii4959_amp    = (1.0/3.0)*na_oiii5007_amp # flux units
+		na_oiii4959_fwhm   = na_oiii5007_fwhm # km/s
+		na_oiii4959_voff   = na_oiii5007_voff  # km/s
+		na_oiii4959_core   = gaussian(lam_gal,na_oiii4959_center,na_oiii4959_amp,na_oiii4959_fwhm,na_oiii4959_voff,velscale)
+		host_model         = host_model - na_oiii4959_core
+		comp_dict['na_oiii4959_core'] = {'comp':na_oiii4959_core,'pcolor':'xkcd:dodger blue','linewidth':0.5}
+		# Narrow H-beta
+		na_hb_center = 4862.680 # Angstroms
+		na_hb_amp    = p['na_Hb_amp'] # flux units
+		na_hb_fwhm   = np.sqrt(na_oiii5007_fwhm**2+(2.355*velscale)**2) # km/s
+		na_hb_voff   = p['na_Hb_voff']  # km/s
+		na_Hb_core   = gaussian(lam_gal,na_hb_center,na_hb_amp,na_hb_fwhm,na_hb_voff,velscale)
+		host_model   = host_model - na_Hb_core
+		comp_dict['na_Hb_core'] = {'comp':na_Hb_core,'pcolor':'xkcd:dodger blue','linewidth':0.5}
+	#### H-alpha/[NII]/[SII] ####################################################################################
+	if all(comp in param_names for comp in ['nii6585_core_amp','nii6585_core_fwhm','nii6585_core_voff',
+											'na_Ha_amp','na_Ha_voff',
+											'sii6732_core_amp','sii6732_core_voff',
+											'sii6718_core_amp'])==True:
+		# Narrow [NII]6585 Core
+		na_nii6585_center = 6585.270 # Angstroms
+		na_nii6585_amp    = p['nii6585_core_amp'] # flux units
+		na_nii6585_fwhm   = np.sqrt(p['nii6585_core_fwhm']**2+(2.355*velscale)**2) # km/s
+		na_nii6585_voff   = p['nii6585_core_voff']  # km/s
+		na_nii6585_core   = gaussian(lam_gal,na_nii6585_center,na_nii6585_amp,na_nii6585_fwhm,na_nii6585_voff,velscale)
+		host_model        = host_model - na_nii6585_core
+		comp_dict['na_nii6585_core'] = {'comp':na_nii6585_core,'pcolor':'xkcd:dodger blue','linewidth':0.5}
+    	# Narrow [NII]6549 Core
+		na_nii6549_center = 6549.860 # Angstroms
+		na_nii6549_amp    = (1.0/2.93)*na_nii6585_amp # flux units
+		na_nii6549_fwhm   = na_nii6585_fwhm # km/s
+		na_nii6549_voff   = na_nii6585_voff  # km/s
+		na_nii6549_core   = gaussian(lam_gal,na_nii6549_center,na_nii6549_amp,na_nii6549_fwhm,na_nii6549_voff,velscale)
+		host_model        = host_model - na_nii6549_core
+		comp_dict['na_nii6549_core'] = {'comp':na_nii6549_core,'pcolor':'xkcd:dodger blue','linewidth':0.5}
+		# Narrow H-alpha
+		na_ha_center = 6564.610 # Angstroms
+		na_ha_amp    = p['na_Ha_amp'] # flux units
+		na_ha_fwhm   = na_nii6585_fwhm # km/s
+		na_ha_voff   = p['na_Ha_voff']  # km/s
+		na_Ha_core   = gaussian(lam_gal,na_ha_center,na_ha_amp,na_ha_fwhm,na_ha_voff,velscale)
+		host_model   = host_model - na_Ha_core
+		comp_dict['na_Ha_core'] = {'comp':na_Ha_core,'pcolor':'xkcd:dodger blue','linewidth':0.5}
+		# Narrow [SII]6732
+		na_sii6732_center = 6732.670 # Angstroms
+		na_sii6732_amp    = p['sii6732_core_amp'] # flux units
+		na_sii6732_fwhm   = na_nii6585_fwhm #np.sqrt(p['sii6732_core_fwhm']**2+(2.355*velscale)**2) # km/s
+		na_sii6732_voff   = p['sii6732_core_voff']  # km/s
+		na_sii6732_core   = gaussian(lam_gal,na_sii6732_center,na_sii6732_amp,na_sii6732_fwhm,na_sii6732_voff,velscale)
+		host_model        = host_model - na_sii6732_core
+		comp_dict['na_sii6732_core'] = {'comp':na_sii6732_core,'pcolor':'xkcd:dodger blue','linewidth':0.5}
+		# Narrow [SII]6718
+		na_sii6718_center = 6718.290 # Angstroms
+		na_sii6718_amp    = p['sii6718_core_amp'] # flux units
+		na_sii6718_fwhm   = na_nii6585_fwhm #na_sii6732_fwhm # km/s
+		na_sii6718_voff   = na_sii6732_voff  # km/s
+		na_sii6718_core   = gaussian(lam_gal,na_sii6718_center,na_sii6718_amp,na_sii6718_fwhm,na_sii6718_voff,velscale)
+		host_model        = host_model - na_sii6718_core
+		comp_dict['na_sii6718_core'] = {'comp':na_sii6718_core,'pcolor':'xkcd:dodger blue','linewidth':0.5}
+	elif all(comp in param_names for comp in ['nii6585_core_amp','nii6585_core_voff',
+											  'na_Ha_amp','na_Ha_voff',
+											  'sii6732_core_amp','sii6732_core_voff',
+											  'sii6718_core_amp'])==True:
+		# Narrow [NII]6585 Core
+		na_nii6585_center = 6585.270 # Angstroms
+		na_nii6585_amp    = p['nii6585_core_amp'] # flux units
+		na_nii6585_fwhm   = np.sqrt(p['oiii5007_core_fwhm']**2+(2.355*velscale)**2) # km/s
+		na_nii6585_voff   = p['nii6585_core_voff']  # km/s
+		na_nii6585_core   = gaussian(lam_gal,na_nii6585_center,na_nii6585_amp,na_nii6585_fwhm,na_nii6585_voff,velscale)
+		host_model        = host_model - na_nii6585_core
+		comp_dict['na_nii6585_core'] = {'comp':na_nii6585_core,'pcolor':'xkcd:dodger blue','linewidth':0.5}
+    	# Narrow [NII]6549 Core
+		na_nii6549_center = 6549.860 # Angstroms
+		na_nii6549_amp    = (1.0/2.93)*na_nii6585_amp # flux units
+		na_nii6549_fwhm   = np.sqrt(p['oiii5007_core_fwhm']**2+(2.355*velscale)**2) # km/s
+		na_nii6549_voff   = na_nii6585_voff  # km/s
+		na_nii6549_core   = gaussian(lam_gal,na_nii6549_center,na_nii6549_amp,na_nii6549_fwhm,na_nii6549_voff,velscale)
+		host_model        = host_model - na_nii6549_core
+		comp_dict['na_nii6549_core'] = {'comp':na_nii6549_core,'pcolor':'xkcd:dodger blue','linewidth':0.5}
+		# Narrow H-alpha
+		na_ha_center = 6564.610 # Angstroms
+		na_ha_amp    = p['na_Ha_amp'] # flux units
+		na_ha_fwhm   = np.sqrt(p['oiii5007_core_fwhm']**2+(2.355*velscale)**2) # km/s
+		na_ha_voff   = p['na_Ha_voff']  # km/s
+		na_Ha_core   = gaussian(lam_gal,na_ha_center,na_ha_amp,na_ha_fwhm,na_ha_voff,velscale)
+		host_model   = host_model - na_Ha_core
+		comp_dict['na_Ha_core'] = {'comp':na_Ha_core,'pcolor':'xkcd:dodger blue','linewidth':0.5}
+		# Narrow [SII]6732
+		na_sii6732_center = 6732.670 # Angstroms
+		na_sii6732_amp    = p['sii6732_core_amp'] # flux units
+		na_sii6732_fwhm   = np.sqrt(p['oiii5007_core_fwhm']**2+(2.355*velscale)**2) # km/s
+		na_sii6732_voff   = p['sii6732_core_voff']  # km/s
+		na_sii6732_core   = gaussian(lam_gal,na_sii6732_center,na_sii6732_amp,na_sii6732_fwhm,na_sii6732_voff,velscale)
+		host_model        = host_model - na_sii6732_core
+		comp_dict['na_sii6732_core'] = {'comp':na_sii6732_core,'pcolor':'xkcd:dodger blue','linewidth':0.5}
+		# Narrow [SII]6718
+		na_sii6718_center = 6718.290 # Angstroms
+		na_sii6718_amp    = p['sii6718_core_amp'] # flux units
+		na_sii6718_fwhm   = np.sqrt(p['oiii5007_core_fwhm']**2+(2.355*velscale)**2)  # km/s
+		na_sii6718_voff   = na_sii6732_voff  # km/s
+		na_sii6718_core   = gaussian(lam_gal,na_sii6718_center,na_sii6718_amp,na_sii6718_fwhm,na_sii6718_voff,velscale)
+		host_model        = host_model - na_sii6718_core
+		comp_dict['na_sii6718_core'] = {'comp':na_sii6718_core,'pcolor':'xkcd:dodger blue','linewidth':0.5}
+	########################################################################################################
+
+	# Outflow Components
+    #### Hb/[OIII] outflows ################################################################################
+	if (all(comp in param_names for comp in ['oiii5007_outflow_amp','oiii5007_outflow_fwhm','oiii5007_outflow_voff'])==True):
+		# Broad [OIII]5007 Outflow;
+		br_oiii5007_center  = 5008.240 # Angstroms
+		br_oiii5007_amp     = p['oiii5007_outflow_amp'] # flux units
+		br_oiii5007_fwhm    = np.sqrt(p['oiii5007_outflow_fwhm']**2+(2.355*velscale)**2) # km/s
+		br_oiii5007_voff    = p['oiii5007_outflow_voff']  # km/s
+		br_oiii5007_outflow = gaussian(lam_gal,br_oiii5007_center,br_oiii5007_amp,br_oiii5007_fwhm,br_oiii5007_voff,velscale)
+		host_model          = host_model - br_oiii5007_outflow
+		comp_dict['br_oiii5007_outflow'] = {'comp':br_oiii5007_outflow,'pcolor':'xkcd:magenta','linewidth':0.5}
+    	# Broad [OIII]4959 Outflow; 
+		br_oiii4959_center  = 4960.295 # Angstroms
+		br_oiii4959_amp     = br_oiii5007_amp*na_oiii4959_amp/na_oiii5007_amp # flux units
+		br_oiii4959_fwhm    = br_oiii5007_fwhm # km/s
+		br_oiii4959_voff    = br_oiii5007_voff  # km/s
+		if (br_oiii4959_amp!=br_oiii4959_amp/1.0) or (br_oiii4959_amp==np.inf): br_oiii4959_amp=0.0
+		br_oiii4959_outflow = gaussian(lam_gal,br_oiii4959_center,br_oiii4959_amp,br_oiii4959_fwhm,br_oiii4959_voff,velscale)
+		host_model          = host_model - br_oiii4959_outflow
+		comp_dict['br_oiii4959_outflow'] = {'comp':br_oiii4959_outflow,'pcolor':'xkcd:magenta','linewidth':0.5}
+		# Broad H-beta Outflow; only a model, no free parameters, tied to [OIII]5007
+		br_hb_outflow_amp  =  br_oiii5007_amp*na_hb_amp/na_oiii5007_amp
+		br_hb_outflow_fwhm = np.sqrt(br_oiii5007_fwhm**2+(2.355*velscale)**2) # km/s
+		br_hb_outflow_voff = na_hb_voff+br_oiii5007_voff
+		if (br_hb_outflow_amp!=br_hb_outflow_amp/1.0) or (br_hb_outflow_amp==np.inf): br_hb_outflow_amp=0.0
+		br_Hb_outflow      = gaussian(lam_gal,na_hb_center,br_hb_outflow_amp,br_hb_outflow_fwhm,br_hb_outflow_voff,velscale)
+		host_model         = host_model - br_Hb_outflow
+		comp_dict['br_Hb_outflow'] = {'comp':br_Hb_outflow,'pcolor':'xkcd:magenta','linewidth':0.5}
+	#### Ha/[NII]/[SII] outflows ###########################################################################
+	if (all(comp in param_names for comp in ['nii6585_outflow_amp','nii6585_outflow_fwhm','nii6585_outflow_voff'])==True):
+		# Outflows in H-alpha/[NII] are poorly constrained due to the presence of a broad line, therefore
+		# we tie all outflows in this region together with the [SII] outflow (as we do similarly for the Hb/[OIII] region)
+		# Broad [NII]6585 Outflow;
+		br_nii6585_center  = 6585.270 # Angstroms
+		br_nii6585_amp     = p['nii6585_outflow_amp'] # flux units
+		br_nii6585_fwhm    = np.sqrt(p['nii6585_outflow_fwhm']**2+(2.355*velscale)**2) # km/s
+		br_nii6585_voff    = p['nii6585_outflow_voff']  # km/s
+		br_nii6585_outflow = gaussian(lam_gal,br_nii6585_center,br_nii6585_amp,br_nii6585_fwhm,br_nii6585_voff,velscale)
+		host_model         = host_model - br_nii6585_outflow
+		comp_dict['br_nii6585_outflow'] = {'comp':br_nii6585_outflow,'pcolor':'xkcd:magenta','linewidth':0.5}
+
+		# Broad [NII]6549 Outflow; 
+		br_nii6549_center  = 6549.860 # Angstroms
+		br_nii6549_amp     = br_nii6585_amp*na_nii6549_amp/na_nii6585_amp # flux units
+		br_nii6549_fwhm    = br_nii6585_fwhm # km/s
+		br_nii6549_voff    = br_nii6585_voff  # km/s
+		if (br_nii6549_amp!=br_nii6549_amp/1.0) or (br_nii6549_amp==np.inf): br_nii6549_amp=0.0
+		br_nii6549_outflow = gaussian(lam_gal,br_nii6549_center,br_nii6549_amp,br_nii6549_fwhm,br_nii6549_voff,velscale)
+		host_model         = host_model - br_nii6549_outflow
+		comp_dict['br_nii6549_outflow'] = {'comp':br_nii6549_outflow,'pcolor':'xkcd:magenta','linewidth':0.5}
+
+		# Broad H-alpha Outflow; 
+		br_ha_center  = 6564.610 # Angstroms
+		br_ha_amp     = br_nii6585_amp*na_ha_amp/na_nii6585_amp # flux units
+		br_ha_fwhm    = br_nii6585_fwhm # km/s
+		br_ha_voff    = br_nii6585_voff  # km/s
+		if (br_ha_amp!=br_ha_amp/1.0) or (br_ha_amp==np.inf): br_ha_amp=0.0
+		br_Ha_outflow = gaussian(lam_gal,br_ha_center,br_ha_amp,br_ha_fwhm,br_ha_voff,velscale)
+		host_model    = host_model - br_Ha_outflow
+		comp_dict['br_Ha_outflow'] = {'comp':br_Ha_outflow,'pcolor':'xkcd:magenta','linewidth':0.5}
+
+		# Broad [SII]6732 Outflow; 
+		br_sii6732_center  = 6732.670 # Angstroms
+		br_sii6732_amp     = br_nii6585_amp*na_sii6732_amp/na_nii6585_amp # flux units
+		br_sii6732_fwhm    = br_nii6585_fwhm # km/s
+		br_sii6732_voff    = br_nii6585_voff  # km/s
+		if (br_sii6732_amp!=br_sii6732_amp/1.0) or (br_sii6732_amp==np.inf): br_sii6732_amp=0.0
+		br_sii6732_outflow = gaussian(lam_gal,br_sii6732_center,br_sii6732_amp,br_sii6732_fwhm,br_sii6732_voff,velscale)
+		host_model         = host_model - br_sii6732_outflow
+		comp_dict['br_sii6732_outflow'] = {'comp':br_sii6732_outflow,'pcolor':'xkcd:magenta','linewidth':0.5}
+	elif ((all(comp in param_names for comp in ['nii6585_outflow_amp','nii6585_outflow_fwhm','nii6585_outflow_voff'])==False) & 
+		  (all(comp in param_names for comp in ['oiii5007_outflow_amp','oiii5007_outflow_fwhm','oiii5007_outflow_voff',
+		  										'nii6585_core_amp','nii6585_core_voff',
+											  	'na_Ha_amp','na_Ha_voff',
+											  	'sii6732_core_amp','sii6732_core_voff',
+											  	'sii6718_core_amp'])==True)):
+		# Outflows in H-alpha/[NII] are poorly constrained due to the presence of a broad line, therefore
+		# we tie all outflows in this region together with the [SII] outflow (as we do similarly for the Hb/[OIII] region)
+		# Broad [NII]6585 Outflow;
+		br_nii6585_center  = 6585.270 # Angstroms
+		br_nii6585_amp     = p['nii6585_outflow_amp'] # flux units
+		br_nii6585_fwhm    = np.sqrt(p['oiii5007_outflow_fwhm']**2+(2.355*velscale)**2) # km/s
+		br_nii6585_voff    = p['nii6585_outflow_voff']  # km/s
+		br_nii6585_outflow = gaussian(lam_gal,br_nii6585_center,br_nii6585_amp,br_nii6585_fwhm,br_nii6585_voff,velscale)
+		host_model         = host_model - br_nii6585_outflow
+		comp_dict['br_nii6585_outflow'] = {'comp':br_nii6585_outflow,'pcolor':'xkcd:magenta','linewidth':0.5}
+
+		# Broad [NII]6549 Outflow; 
+		br_nii6549_center  = 6549.860 # Angstroms
+		br_nii6549_amp     = br_nii6585_amp*na_nii6549_amp/na_nii6585_amp # flux units
+		br_nii6549_fwhm    = br_nii6585_fwhm # km/s
+		br_nii6549_voff    = br_nii6585_voff  # km/s
+		if (br_nii6549_amp!=br_nii6549_amp/1.0) or (br_nii6549_amp==np.inf): br_nii6549_amp=0.0
+		br_nii6549_outflow = gaussian(lam_gal,br_nii6549_center,br_nii6549_amp,br_nii6549_fwhm,br_nii6549_voff,velscale)
+		host_model         = host_model - br_nii6549_outflow
+		comp_dict['br_nii6549_outflow'] = {'comp':br_nii6549_outflow,'pcolor':'xkcd:magenta','linewidth':0.5}
+
+		# Broad H-alpha Outflow; 
+		br_ha_center  = 6564.610 # Angstroms
+		br_ha_amp     = br_nii6585_amp*na_ha_amp/na_nii6585_amp # flux units
+		br_ha_fwhm    = br_nii6585_fwhm # km/s
+		br_ha_voff    = br_nii6585_voff  # km/s
+		if (br_ha_amp!=br_ha_amp/1.0) or (br_ha_amp==np.inf): br_ha_amp=0.0
+		br_Ha_outflow = gaussian(lam_gal,br_ha_center,br_ha_amp,br_ha_fwhm,br_ha_voff,velscale)
+		host_model    = host_model - br_Ha_outflow
+		comp_dict['br_Ha_outflow'] = {'comp':br_Ha_outflow,'pcolor':'xkcd:magenta','linewidth':0.5}
+
+		# Broad [SII]6732 Outflow; 
+		br_sii6732_center  = 6732.670 # Angstroms
+		br_sii6732_amp     = br_nii6585_amp*na_sii6732_amp/na_nii6585_amp # flux units
+		br_sii6732_fwhm    = br_nii6585_fwhm # km/s
+		br_sii6732_voff    = br_nii6585_voff  # km/s
+		if (br_sii6732_amp!=br_sii6732_amp/1.0) or (br_sii6732_amp==np.inf): br_sii6732_amp=0.0
+		br_sii6732_outflow = gaussian(lam_gal,br_sii6732_center,br_sii6732_amp,br_sii6732_fwhm,br_sii6732_voff,velscale)
+		host_model         = host_model - br_sii6732_outflow
+		comp_dict['br_sii6732_outflow'] = {'comp':br_sii6732_outflow,'pcolor':'xkcd:magenta','linewidth':0.5}
+
+		# Broad [SII]6718 Outflow; 
+		br_sii6718_center  = 6718.290 # Angstroms
+		br_sii6718_amp     = br_nii6585_amp*na_sii6718_amp/na_nii6585_amp # flux units
+		br_sii6718_fwhm    = br_nii6585_fwhm # km/s
+		br_sii6718_voff    = br_nii6585_voff  # km/s
+		if (br_sii6718_amp!=br_sii6718_amp/1.0) or (br_sii6718_amp==np.inf): br_sii6718_amp=0.0
+		br_sii6718_outflow = gaussian(lam_gal,br_sii6718_center,br_sii6718_amp,br_sii6718_fwhm,br_sii6718_voff,velscale)
+		host_model         = host_model - br_sii6718_outflow
+		comp_dict['br_sii6718_outflow'] = {'comp':br_sii6718_outflow,'pcolor':'xkcd:magenta','linewidth':0.5}
+
+
+	########################################################################################################
+
+	# Broad Lines
+	# #### Br. H-delta #######################################################################################
+	# Commented out because Br. H-delta is usually not distinguishable from the noise.
+	# if all(comp in param_names for comp in ['br_Hd_amp','br_Hd_fwhm','br_Hd_voff'])==True:
+	# 	na_hd_center = 4102.89 # Angstroms
+	# 	br_hd_amp    = p['br_Hd_amp'] # flux units
+	# 	br_hd_fwhm   = np.sqrt(p['br_Hd_fwhm']**2+(2.355*velscale)**2) # km/s
+	# 	br_hd_voff   = p['br_Hd_voff']  # km/s
+	# 	br_Hd        = gaussian(lam_gal,na_hd_center,br_hd_amp,br_hd_fwhm,br_hd_voff,velscale)
+	# 	host_model         = host_model - br_Hd
+	# 	comp_dict['br_Hd'] = {'comp':br_Hd,'pcolor':'xkcd:blue','linewidth':0.5}
+	#### Br. H-gamma #######################################################################################
+	if all(comp in param_names for comp in ['br_Hg_amp','br_Hg_fwhm','br_Hg_voff'])==True:
+		na_hg_center = 4341.680 # Angstroms
+		br_hg_amp    = p['br_Hg_amp'] # flux units
+		br_hg_fwhm   = np.sqrt(p['br_Hg_fwhm']**2+(2.355*velscale)**2) # km/s
+		br_hg_voff   = p['br_Hg_voff']  # km/s
+		br_Hg        = gaussian(lam_gal,na_hg_center,br_hg_amp,br_hg_fwhm,br_hg_voff,velscale)
+		host_model         = host_model - br_Hg
+		comp_dict['br_Hg'] = {'comp':br_Hg,'pcolor':'xkcd:blue','linewidth':0.5}
+	#### Br. H-beta ########################################################################################
+	if all(comp in param_names for comp in ['br_Hb_amp','br_Hb_fwhm','br_Hb_voff'])==True:
+		na_hb_center = 4862.68 # Angstroms
+		br_hb_amp    = p['br_Hb_amp'] # flux units
+		br_hb_fwhm   = np.sqrt(p['br_Hb_fwhm']**2+(2.355*velscale)**2) # km/s
+		br_hb_voff   = p['br_Hb_voff']  # km/s
+		br_Hb        = gaussian(lam_gal,na_hb_center,br_hb_amp,br_hb_fwhm,br_hb_voff,velscale)
+		host_model         = host_model - br_Hb
+		comp_dict['br_Hb'] = {'comp':br_Hb,'pcolor':'xkcd:blue','linewidth':0.5}
+ 
+	#### Br. H-alpha #######################################################################################
+	if all(comp in param_names for comp in ['br_Ha_amp','br_Ha_fwhm','br_Ha_voff'])==True:
+		na_ha_center = 6564.610 # Angstroms
+		br_ha_amp    = p['br_Ha_amp'] # flux units
+		br_ha_fwhm   = np.sqrt(p['br_Ha_fwhm']**2+(2.355*velscale)**2) # km/s
+		br_ha_voff   = p['br_Ha_voff']  # km/s
+		br_Ha        = gaussian(lam_gal,na_ha_center,br_ha_amp,br_ha_fwhm,br_ha_voff,velscale)
+		host_model         = host_model - br_Ha
+		comp_dict['br_Ha'] = {'comp':br_Ha,'pcolor':'xkcd:blue','linewidth':0.5}
+
+	########################################################################################################
+
+	########################################################################################################
+
+	############################# Host-galaxy Component ######################################################
+
+	if all(comp in param_names for comp in ['gal_temp_amp'])==True:
+		gal_temp = p['gal_temp_amp']*(gal_temp)
+		host_model = (host_model) - (gal_temp) # Subtract off continuum from galaxy, since we only want template weights to be fit
+		comp_dict['gal_temp'] = {'comp':gal_temp,'pcolor':'xkcd:lime green','linewidth':0.5}
+
+	########################################################################################################   
+
+	############################# LOSVD Component ####################################################
+
+	if all(comp in param_names for comp in ['stel_vel','stel_disp'])==True:
+		# Convolve the templates with a LOSVD
+		losvd_params = [p['stel_vel'],p['stel_disp']] # ind 0 = velocity*, ind 1 = sigma*
+		conv_temp    = convolve_gauss_hermite(temp_fft,npad,float(velscale),\
+					   losvd_params,npix,velscale_ratio=1,sigma_diff=0,vsyst=vsyst)
+		
+		# Fitted weights of all templates using Non-negative Least Squares (NNLS)
+
+		weights     = nnls(conv_temp,host_model)
+		host_galaxy = (np.sum(weights*conv_temp,axis=1)) 
+		comp_dict['host_galaxy'] = {'comp':host_galaxy,'pcolor':'xkcd:lime green','linewidth':0.5}
+		if move_temp==True:
+			# Templates that are used are placed in templates folder
+			def path_leaf(path):
+				head, tail = ntpath.split(path)
+				return tail or ntpath.basename(head)
+
+			a =  np.where(weights>0)[0]
+			for i in a:
+				s = temp_list[i]
+				temp_name = path_leaf(temp_list[i])
+				if os.path.exists(run_dir+'templates/'+temp_name)==False:
+					# Check if template file was already copied to template folder
+					# If not, copy it to templates folder for each object
+					# print(' Moving template %s' % temp_name)
+					shutil.copyfile(temp_list[i],run_dir+'templates/'+temp_name)
+
+
+	# if 1: sys.exit()
+    ########################################################################################################
+    
+	# The final model
+	gmodel = np.sum((d['comp'] for d in comp_dict.values() if d),axis=0)
+	
+	########################## Measure Emission Line Fluxes #################################################
+
+	# comp_fluxes = [] # list of all computed fluxes 
+	em_line_fluxes = {}
+	if (fit_type=='final'):
+		for key in comp_dict:
+			# compute the integrated flux 
+			flux = simps(comp_dict[key]['comp'],lam_gal)
+			# add key/value pair to dictionary
+			em_line_fluxes[key+'_flux'] = [flux]
+		df_fluxes = pd.DataFrame(data=em_line_fluxes,columns=em_line_fluxes.keys())
+		# Write to csv
+		# Create a folder in the working directory to save plots and data to
+		if os.path.exists(run_dir+'em_line_fluxes.csv')==False:
+			# If file has not been created, create it 
+			# print(' File does not exist!')
+			df_fluxes.to_csv(run_dir+'em_line_fluxes.csv',sep=',')
+		elif os.path.exists(run_dir+'em_line_fluxes.csv')==True:
+			# If file has been created, append df_fluxes to existing file
+			# print( ' File exists!')
+			with open(run_dir+'em_line_fluxes.csv', 'a') as f:
+				df_fluxes.to_csv(f, header=False)
+
+	##################################################################################
+
+	# Add last components to comp_dict for plotting purposes 
+	# Add galaxy, sigma, model, and residuals to comp_dict
+	comp_dict['data']      = {'comp':galaxy      ,'pcolor':'xkcd:white','linewidth':0.5}
+	comp_dict['wave']      = {'comp':lam_gal 	 ,'pcolor':'xkcd:bluegrey','linewidth':0.5}
+	comp_dict['noise']     = {'comp':noise       ,'pcolor':'xkcd:bluegrey','linewidth':0.5}
+	comp_dict['model']     = {'comp':gmodel      ,'pcolor':'xkcd:red','linewidth':0.5}
+	comp_dict['residuals'] = {'comp':galaxy-gmodel,'pcolor':'xkcd:white','linewidth':0.5}
+
+	##################################################################################
+	if (output_model==True) and (fit_type=='init'):
+		fig = plt.figure(figsize=(14,6))
+		ax1 = fig.add_subplot(1,1,1)
+		for key in comp_dict:
+			if ((key != 'wave') and (key != 'noise')):
+				print key
+				ax1.plot(lam_gal,comp_dict[key]['comp'],color=comp_dict[key]['pcolor'],linewidth=comp_dict[key]['linewidth'])
+		ax1.axhline(0.0,color='white',linestyle='--')
+		ax1.set_ylabel(r'$f_\lambda$ (erg cm$^{-2}$ s$^{-1}$ $\mathrm{\AA}^{-1}$)')
+		ax1.set_xlabel(r'$\lambda_{\mathrm{rest}}$ ($\mathrm{\AA}$)')
+		ax1.set_xlim(np.min(lam_gal),np.max(lam_gal))
+		plt.tight_layout()
+		plt.savefig(run_dir+'max_like_outflows.pdf',fmt='pdf',dpi=150)
+		# if 1: sys.exit()
+	
+	##################################################################################
+
+	if (fit_type=='init') and (output_model==False): # For max. likelihood fitting
+		return gmodel
+	elif (fit_type=='monte_carlo'):
+		return comp_dict
+	elif (fit_type=='final') and (output_model==False): # don't output all models
+		return gmodel
+	elif (fit_type=='final') and (output_model==True): # output all models
+		return comp_dict #,weights
+
+########################################################################################################
+
+
+#### Host-Galaxy Template##############################################################################
+
+# This function is used if we use the Maraston et al. 2009 SDSS composite templates but the absorption
+# features are not deep enough to describe NLS1s.
+def galaxy_template(lam,age=None):
+	if ((age<1) or (age>15)) and (age is not None):
+		raise ValueError('\n You must choose an age between (1 Gyr <= age <= 15 Gyr)! \n')
+	elif (age is None):
+		# We use the SDSS template from Maraston et al. 2009 
+		# The template is used as a placeholder for the stellar continuum
+		# in the initial parameter fit.
+		# Open the file and get the appropriate age galaxy (default age=5 Gyr)
+		df = pd.read_csv('badass_data_files/nls1_template.csv',skiprows=1,sep=',',names=['wave','flux'])
+
+		# if 1: sys.exit()
+		wave =  np.array(df['wave'])
+		flux =  np.array(df['flux'])
+		# Interpolate the template 
+		gal_interp = interp1d(wave,flux,kind='cubic',bounds_error=False,fill_value=(flux[0],flux[-1]))
+		gal_temp = gal_interp(lam)
+		# Normalize by median
+		gal_temp = gal_temp/np.median(gal_temp)
+		return gal_temp
+	elif ((age>=1) and (age<=15)):
+		# We use the SDSS template from Maraston et al. 2009 
+		# The template is used as a placeholder for the stellar continuum
+		# in the initial parameter fit.
+		# Open the file and get the appropriate age galaxy (default age=5 Gyr)
+		df = pd.read_csv('badass_data_files/M09_composite_bestfitLRG.csv',skiprows=5,sep=',',names=['t_Gyr','AA','flam'])
+		wave =  np.array(df.loc[(df['t_Gyr']==age),'AA'])
+		flux =  np.array(df.loc[(df['t_Gyr']==age),'flam'])
+		# Interpolate the template 
+		gal_interp = interp1d(wave,flux,kind='cubic',bounds_error=False,fill_value=(0,0))
+		gal_temp = gal_interp(lam)
+		# Normalize by median
+		gal_temp = gal_temp/np.median(gal_temp)
+		return gal_temp
+
+##################################################################################
+
+
+#### FeII Templates ##############################################################
+
+def initialize_feii(lam_gal,velscale,fit_reg):
+	# Read in template data
+	na_feii_table = pd.read_csv('badass_data_files/na_feii_template.csv')
+	br_feii_table = pd.read_csv('badass_data_files/br_feii_template.csv')
+
+	# Construct the FeII templates here (do not reconstruct them for every iteration; only amplitude is changing)
+	# Initialize the templates with a given guess for the amplitude; we take 10% of the median flux
+	feii_voff = 0.0 # velocity offset
+	na_feii_amp = 1.0
+	na_feii_rel_int  = np.array(na_feii_table['na_relative_intensity'])
+	na_feii_center = np.array(na_feii_table['na_wavelength'])
+	na_feii_fwhm = 500.0 # km/s; keep fixed
+	br_feii_amp = 1.0
+	br_feii_rel_int  = np.array(br_feii_table['br_relative_intensity'])
+	br_feii_center = np.array(br_feii_table['br_wavelength'])
+	br_feii_fwhm = 3000.0 # km/s; keep fixed    
+	na_feii_template = feii_template(lam_gal,na_feii_rel_int,na_feii_center,na_feii_amp,na_feii_fwhm,feii_voff,velscale,fit_reg)
+	br_feii_template = feii_template(lam_gal,br_feii_rel_int,br_feii_center,br_feii_amp,br_feii_fwhm,feii_voff,velscale,fit_reg)
+	
+	return na_feii_template, br_feii_template
+
+def feii_template(lam,rel_int,center,amp,sigma,voff,velscale,fit_reg):
+
+	"""
+	Produces a gaussian vector the length of
+	x with the specified parameters.
+	
+	Parameters
+	----------
+	x : array_like
+	    the wavelength vector
+	A : float
+	    the amplitude of the gaussian.
+	center: float
+	    the mean or center wavelength of the gaussian.
+	sigma: float
+	    the standard deviation of the gaussian.
+	
+	Returns
+	-------
+	g: array
+	    a one-dimensional gaussian as a function of x.
+	"""
+	# Create an empty array in which to store the lines before summing them
+	template = []
+	for i in range(0,len(rel_int),1):
+		if ((((fit_reg[0]+25.) < center[i] < (fit_reg[1]-25.))==True)):
+			line = amp*(gaussian(lam,center[i],rel_int[i],sigma,voff,velscale))
+			template.append(line)
+		else:
+			continue
+	template = np.sum(template,axis=0)
+	
+	return template
+
+##################################################################################
+
+
+#### Power-Law Template ##########################################################
+
+def simple_power_law(x,amp,alpha,xb):
+	"""
+	Simple power-low function to model
+	the AGNs continuum.
+
+	Parameters
+	----------
+	x     : array_like
+		    wavelength vector (angstroms)
+	amp   : float 
+		    continuum amplitude (flux density units)
+	alpha : float
+			power-law slope
+	xb    : float
+		    location of kink in the power-law (angstroms)
+
+	Returns
+	----------
+	C     : array
+		    AGN continuum model the same length as x
+	"""
+	# xb = np.max(x)-((np.max(x)-np.min(x))/2.0) # take to be half of the wavelength range
+
+	C = amp*(x/xb)**alpha # un-normalized
+	return C
+
+##################################################################################
+
+
+##################################################################################
+
+def gaussian(x,center,amp,fwhm,voff,velscale):
+    """
+    Produces a gaussian vector the length of
+    x with the specified parameters.
+    
+    Parameters
+    ----------
+    x        : array_like
+        	   the wavelength vector in angstroms.
+    center   : float
+        	   the mean or center wavelength of the gaussian in angstroms.
+    sigma    : float
+        	   the standard deviation of the gaussian in km/s.
+    amp      : float
+        	   the amplitude of the gaussian in flux units.
+    voff     : the velocity offset (in km/s) from the rest-frame 
+          	   line-center (taken from SDSS rest-frame emission
+          	   line wavelengths)
+    velscale : velocity scale; km/s/pixel
+
+    Returns
+    -------
+    g        : array_like
+        	   a one-dimensional gaussian as a function of x,
+        	   where x is measured in PIXELS.
+    """
+    x_pix = range(len(x))
+    wave_interp = interp1d(x,x_pix,kind='cubic',bounds_error=False,fill_value=(0,0))
+    center_pix = wave_interp(center) # pixel value corresponding to line center
+    sigma = fwhm/2.3548
+    sigma_pix = sigma/velscale
+    voff_pix = voff/velscale
+    center_pix = center_pix + voff_pix
+    
+    # print center_pix,sigma_pix,voff_pix
+
+    g = amp*np.exp(-0.5*(x_pix-(center_pix))**2/(sigma_pix)**2)
+    
+    # Make sure edges of gaussian are zero 
+    if (g[0]>1.0e-6) or g[-1]>1.0e-6:
+        g = np.zeros(len(g))
+    
+    return g
+
+##################################################################################
+
+
+##################################################################################
+
 
 # pPXF Routines (from Cappellari 2017)
-##################################################################################
 
-def find_nearest(array, value):
-    array = np.asarray(array)
-    idx = (np.abs(array - value)).argmin()
-    return array[idx]
-
-##################################################################################
 
 # NAME:
 #   GAUSSIAN_FILTER1D
@@ -598,1300 +2583,115 @@ def nnls(A,b,npoly=0):
 
 ####################################################################################
 
-# Maximum Likelihood (initial fitting), Prior, and log Probability functions
+def run_emcee(sampler,pos,ndim,max_iter,init_params,auto_stop,auto_stop_thresh,write_thresh,write_iter,param_names,run_dir):
+
+	# Create MCMC_chain.csv if it doesn't exist
+	if os.path.exists(run_dir+'MCMC_chain.csv')==False:
+		f = open(run_dir+'MCMC_chain.csv','w')
+		param_string = ', '.join(str(e) for e in param_names)
+		f.write('# iter, ' + param_string) # Write initial parameters
+		best_str = ', '.join(str(e) for e in init_params)
+		f.write('\n 0, '+best_str)
+		f.close()
+
+	start_time = time.time() # start timer
+	
+	# Run emcee
+	for k, result in enumerate(sampler.sample(pos, iterations=max_iter)):
+		if ((k+1)%1==0): # print every iteration
+			print('          Iteration = %d' % (k+1))
+		if (k>1) and ((k+1) % write_iter == 0):
+			print('\n          Check iteration = %d \n' % (k+1))
+		if ((k+1) % write_iter == 0) and ((k+1)>=write_thresh): # Write every [write_iter] iteration
+			# Old method
+			# flat = sampler.chain[:,k+1-write_thresh:k+1,:].reshape((-1, ndim))
+			# print(np.shape(flat), k+1-write_thresh, k+1)
+			# best = []
+			# for pp in range(0,np.shape(flat)[1],1):
+			#     data = (flat[:,pp])
+			#     mu, std = norm.fit(data)
+			#     best.append(mu)
+
+			# New method
+			# Chain location for each parameter
+			# Median of last 100 positions for each walker.
+			nwalkers = np.shape(sampler.chain)[0]
+			npar = np.shape(sampler.chain)[2]
+			
+			sampler_chain = sampler.chain[:,:k+1,:]
+			new_sampler_chain = []
+			for i in range(0,np.shape(sampler_chain)[2],1):
+			    pflat = sampler_chain[:,:,i] # flattened along parameter
+			    flat  = np.concatenate(np.stack(pflat,axis=1),axis=0)
+			    new_sampler_chain.append(flat)
+			best = []
+			for pp in range(0,npar,1):
+				data = new_sampler_chain[pp][-int(nwalkers*write_iter):]
+				med = np.median(data)
+				best.append(med)
+
+			f = open(run_dir+'MCMC_chain.csv','a')
+			best_str = ', '.join(str(e) for e in best)
+			f.write('\n'+str(k+1)+', '+best_str)
+			f.close()
+		if ((k+1) % write_iter == 0) and ((k+1)>=2*write_thresh) and (auto_stop==True): # Auto Stop: Every 100th iteration, compare the last step
+		    # Compare the last two lines
+		    with open(run_dir+'MCMC_chain.csv','rb') as f: lines = f.readlines()
+		    line2 = np.array(lines[-1].split(','))[1:]
+		    line2 = line2.astype(np.float)
+		    line1 = np.array(lines[-2].split(','))[1:]
+		    line1 = line1.astype(np.float)
+		    lim = np.abs(np.abs(line1-line2)/np.mean([line1,line2],axis=0)*100.)
+		    if 'oiii5007_outflow_amp' in param_names: 
+		        check_par = np.array([param_names[param_names.index('stel_vel')],param_names[param_names.index('stel_disp')],\
+		                              param_names[param_names.index('oiii5007_core_amp')],param_names[param_names.index('oiii5007_core_fwhm')],\
+		                              param_names[param_names.index('oiii5007_outflow_amp')],param_names[param_names.index('oiii5007_outflow_fwhm')],\
+		                              param_names[param_names.index('br_Hb_amp')],param_names[param_names.index('br_Hb_fwhm')]])
+		        check_arr = np.array([lim[param_names.index('stel_vel')],lim[param_names.index('stel_disp')],\
+		                              lim[param_names.index('oiii5007_core_amp')],lim[param_names.index('oiii5007_core_fwhm')],\
+		                              lim[param_names.index('oiii5007_outflow_amp')],lim[param_names.index('oiii5007_outflow_fwhm')],\
+		                              lim[param_names.index('br_Hb_amp')],lim[param_names.index('br_Hb_fwhm')]])
+		        print(check_par, check_arr)
+		        for p,l in enumerate(check_arr): 
+		            if (l>auto_stop_thresh):
+		                print(' %s has not converged! (%0.2f)' % (check_par[p],l))
+		        if (all(check_arr<auto_stop_thresh)==True) and (lim[param_names.index('br_Hb_fwhm')]<0.1): 
+		            print("--- %s seconds ---" % (time.time() - start_time))
+		            break
+		    elif 'oiii5007_outflow_amp' not in param_names:
+		    	check_par = np.array([param_names[param_names.index('stel_vel')],param_names[param_names.index('stel_disp')],\
+		                              param_names[param_names.index('oiii5007_core_amp')],param_names[param_names.index('oiii5007_core_fwhm')],\
+		                              param_names[param_names.index('br_Hb_amp')],param_names[param_names.index('br_Hb_fwhm')]])
+		        check_arr = np.array([lim[param_names.index('stel_vel')],lim[param_names.index('stel_disp')],\
+		                              lim[param_names.index('oiii5007_core_amp')],lim[param_names.index('oiii5007_core_fwhm')],\
+		                              lim[param_names.index('br_Hb_amp')],lim[param_names.index('br_Hb_fwhm')]])
+		        print(check_par, check_arr)
+		        for p,l in enumerate(check_arr): 
+		            if (l>auto_stop_thresh):
+		                print(' %s has not converged! (%0.2f)' % (check_par[p],l))
+		        if (all(check_arr<auto_stop_thresh)==True) and (lim[param_names.index('br_Hb_fwhm')]<0.1): 
+		            print("--- %s seconds ---" % (time.time() - start_time))
+		            break
+	elap_time = (time.time() - start_time)	   
+	print("\n Runtime = %s. \n" % (time_convert(elap_time)))    
+
+	nfinal = (k+1)
+	sampler_chain = sampler.chain[:,:nfinal,:] # Prune the sampler chain of excess zero-arrays
+
+	# nwalkers = np.shape(sampler_chain)[0]
+	# nsteps = np.shape(sampler_chain)[1]
+	# ndim = len(param_names)
+	# flattened_chain = sampler_chain[:, :, :].reshape((-1, ndim))
+
+	new_sampler_chain = []
+	for i in range(0,np.shape(sampler_chain)[2],1):
+	# for i in range(0,1,1):
+	    pflat = sampler_chain[:,:,i] # flattened along parameter
+	    flat  = np.concatenate(np.stack(pflat,axis=1),axis=0)
+	    new_sampler_chain.append(flat)
+
+	return new_sampler_chain
 
-def lnlike_init_outflows(params,lam_gal,fwhm_gal,na_feii_template,br_feii_template,gal_temp,velscale,galaxy,sigma,run_dir):
-    # Create model
-    model = init_outflow_model(params,lam_gal,fwhm_gal,na_feii_template,br_feii_template,gal_temp,velscale,galaxy,run_dir)
-    # Calculate log-likelihood
-    l = -0.5*(galaxy-model)**2/(sigma)**2
-    l = np.sum(l,axis=0)
-    return l #l,model
-
-def lnlike_init_no_outflows(params,lam_gal,fwhm_gal,na_feii_template,br_feii_template,gal_temp,velscale,galaxy,sigma,run_dir):
-    # Create model
-    model = init_no_outflow_model(params,lam_gal,fwhm_gal,na_feii_template,br_feii_template,gal_temp,velscale,galaxy,run_dir)
-    # Calculate log-likelihood
-    l = -0.5*(galaxy-model)**2/(sigma)**2
-    l = np.sum(l,axis=0)
-    return l #l,model
-
-def max_likelihood_outflows(params,param_limits,args):
-    lam_gal,fwhm_gal,na_feii_template,br_feii_template,gal_temp,velscale,galaxy,noise,run_dir = args
-    # This function performs an initial maximum likelihood
-    # estimation to acquire robust initial parameters.
-
-    # Define constraint functions for the outflow components
-    # Free-parameters (14 total):
-    #------------------------------------------
-    # [0] - Galaxy template amplitude
-    # [1] - Narrow FeII amplitude
-    # [2] - Broad FeII amplitude
-    # [3] - Na. [OIII]5007 Core Amplitude
-    # [4] - Na. [OIII]5007 Core FWHM
-    # [5] - Na. [OIII]5007 Core VOFF
-    # [6] - Br. [OIII]5007 Outflow amplitude
-    # [7] - Br. [OIII]5007 Outflow FWHM
-    # [8] - Br. [OIII]5007 Outflow VOFF
-    #      - Br. [OIII]4959 Outflow and Na. H-beta outflows are tied to [OIII]5007 outflow
-    # [9] - Na. H-beta amplitude
-    #      - Na. H-beta FWHM tied to [OIII]5007
-    # [10] - Na. H-beta VOFF
-    # [11] - Br. H-beta amplitude
-    # [12] - Br. H-beta FWHM
-    # [13] - Br. H-beta VOFF
-    def amp_constraint(p):
-        return p[3]-p[6]
-
-    def fwhm_constraint(p):
-        return p[7]-p[4]
-
-    def voff_constraint(p):
-        return p[5]-p[8]
-
-    cons = [{'type':'ineq','fun': fwhm_constraint },
-            {'type':'ineq','fun': voff_constraint },
-            {'type':'ineq','fun':  amp_constraint }]
-    
-    # cons = [{'type':'ineq','fun': fwhm_constraint },
-    #         {'type':'ineq','fun': voff_constraint }]
-
-    # Specify bounds for maximum likelihood fit
-    bounds = []
-    for i in range(0,len(param_limits[0]),1):
-        bounds.append((param_limits[0][i],param_limits[1][i]))
-    # Perform maximum likelihood estimation for initial guesses of MCMC fit
-    nll = lambda *args: -lnlike_init_outflows(*args)
-    result = op.minimize(fun = nll, x0 = params, \
-             args=(lam_gal,fwhm_gal,na_feii_template,br_feii_template,gal_temp,velscale,galaxy,noise,run_dir),\
-             method='SLSQP', bounds = bounds, constraints=cons, options={'maxiter':2500,'disp': True})
-    # result = op.minimize(fun = nll, x0 = params, \
-    #          args=(lam_gal,fwhm_gal,na_feii_template,br_feii_template,gal_temp,velscale,galaxy,noise,run_dir),\
-    #          method='L-BFGS-B', bounds = bounds, options={'maxiter':2500,'disp': True})
-    return result
-
-def max_likelihood_no_outflows(params,param_limits,args):
-    lam_gal,fwhm_gal,na_feii_template,br_feii_template,gal_temp,velscale,galaxy,noise,run_dir = args
-    # This function performs an initial maximum likelihood
-    # estimation to acquire robust initial parameters.
-    # Specify bounds for maximum likelihood fit
-    bounds = []
-    for i in range(0,len(param_limits[0]),1):
-        bounds.append((param_limits[0][i],param_limits[1][i]))
-    # Perform maximum likelihood estimation for initial guesses of MCMC fit
-    nll = lambda *args: -lnlike_init_no_outflows(*args)
-    result = op.minimize(fun = nll, x0 = params, \
-             args=(lam_gal,fwhm_gal,na_feii_template,br_feii_template,gal_temp,velscale,galaxy,noise,run_dir),\
-             method='SLSQP', bounds = bounds,options={'maxiter':2500,'disp': True})
-    # result = op.minimize(fun = nll, x0 = params, \
-    #          args=(lam_gal,fwhm_gal,na_feii_template,br_feii_template,gal_temp,velscale,galaxy,noise,run_dir),\
-    #          method='L-BFGS-B', bounds = bounds, options={'maxiter':2500,'disp': True})
-    return result
-   
-def lnlike_final_outflows(params,lam_gal,fwhm_gal,na_feii_template,br_feii_template,temp_fft,npad,velscale,npix,dv,galaxy,sigma,temp_list,run_dir):
-    # Create model
-    model = final_outflow_model(params,lam_gal,fwhm_gal,na_feii_template,br_feii_template,temp_fft,npad,velscale,npix,dv,galaxy,temp_list,run_dir,move_temp=1)
-    # Calculate log-likelihood
-    l = -0.5*(galaxy-model)**2/(sigma)**2
-    l = np.sum(l,axis=0)
-    return l #l,model
-
-
-def lnlike_final_no_outflows(params,lam_gal,fwhm_gal,na_feii_template,br_feii_template,temp_fft,npad,velscale,npix,dv,galaxy,sigma,temp_list,run_dir):
-    # Create model
-    model = final_no_outflow_model(params,lam_gal,fwhm_gal,na_feii_template,br_feii_template,temp_fft,npad,velscale,npix,dv,galaxy,temp_list,run_dir,move_temp=1)
-    # Calculate log-likelihood
-    l = -0.5*(galaxy-model)**2/(sigma)**2
-    l = np.sum(l,axis=0)
-    return l #l,model
-
-def lnprior_outflow(bounds,params):  
-    # Free-parameters (17 total):
-    #------------------------------------------
-    # [0]  - Stellar velocity
-    # [1]  - Stellar velocity dispersion
-    # [2]  - AGN simple power-law slope
-    # [3]  - AGN simple power-law amplitude
-    # [4]  - Narrow FeII amplitude
-    # [5]  - Broad FeII amplitude
-    # [6]  - Na. [OIII]5007 Core Amplitude
-    # [7]  - Na. [OIII]5007 Core FWHM
-    # [8]  - Na. [OIII]5007 Core VOFF
-    # [9]  - Br. [OIII]5007 Outflow amplitude
-    # [10] - Br. [OIII]5007 Outflow FWHM
-    # [11] - Br. [OIII]5007 Outflow VOFF
-    # [12] - Na. H-beta amplitude
-    # [13] - Na. H-beta VOFF
-    # [14] - Br. H-beta amplitude
-    # [15] - Br. H-beta FWHM
-    # [16] - Br. H-beta VOFF
-    # if np.all((params >= bounds[0]) & (params <= bounds[1])):
-    #     return 0.0
-    if np.all((params >= bounds[0]) & (params <= bounds[1])) & (params[6] > params[9]) & (params[10] > params[7]) & (params[8] > params[11]):
-        return 0.0
-    return -np.inf 
-
-def lnprior_no_outflow(bounds,params):  
-    if np.all((params >= bounds[0]) & (params <= bounds[1])):
-        return 0.0
-    return -np.inf 
-
-def lnprob(params,bounds,lam_gal,fwhm_gal,na_feii_template,br_feii_template,temp_fft,npad,velscale,npix,dv,galaxy,sigma,temp_list,run_dir,final_model):
-    if (final_model=='outflow'):
-        lp = lnprior_outflow(bounds,params)
-    elif (final_model=='NO_outflow'):
-        lp = lnprior_no_outflow(bounds,params)
-    ##############################################
-    if not np.isfinite(lp):
-        return -np.inf
-    elif (final_model=='outflow') and (np.isfinite(lp)==True):
-        return lp + lnlike_final_outflows(params,lam_gal,fwhm_gal,na_feii_template,br_feii_template,temp_fft,npad,velscale,npix,dv,galaxy,sigma,temp_list,run_dir)
-    elif (final_model=='NO_outflow') and (np.isfinite(lp)==True):
-        return lp + lnlike_final_no_outflows(params,lam_gal,fwhm_gal,na_feii_template,br_feii_template,temp_fft,npad,velscale,npix,dv,galaxy,sigma,temp_list,run_dir)
-
-
-####################################################################################
-
-# Model Functions
-
-def initialize_mcmc_init_outflows(lam_gal,galaxy,velscale):
-    ################################################################################
-    # Initial conditions for some parameters
-    max_flux = np.max(galaxy)
-    total_flux_init = np.median(galaxy[(lam_gal>5025.) & (lam_gal<5800.)])
-    # cont_flux_init = 0.01*(np.median(galaxy))
-    feii_flux_init= (0.1*np.median(galaxy))
-    hb_amp_init= (np.max(galaxy[(lam_gal>4862-50) & (lam_gal<4862+50)]))
-    oiii5007_amp_init = (np.max(galaxy[(lam_gal>5007-50) & (lam_gal<5007+50)]))
-
-    # print('Total flux level: %0.2e' % total_flux_init)
-    # print('Continuum flux level: %0.2e' % cont_flux_init )
-    # print('FeII flux level: %0.2e' % feii_flux_init)
-    
-    ################################################################################
-    
-    mcmc_input = [] # array of parameter dicts
-    # [0] - Galaxy template amplitude
-    mcmc_input.append({'name':'$A_\mathrm{gal}$','init':0.99*total_flux_init,'pmin':0.0,'pmax':max_flux})
-    # [1] - Narrow FeII amplitude
-    mcmc_input.append({'name':'$A_\mathrm{Na\;FeII}$','init':feii_flux_init,'pmin':0.0,'pmax':total_flux_init})
-    # [2] - Broad FeII amplitude
-    mcmc_input.append({'name':'$A_\mathrm{Br\;FeII}$','init':feii_flux_init,'pmin':0.0,'pmax':total_flux_init})
-    # [3] - Na. [OIII]5007 Core Amplitude
-    mcmc_input.append({'name':'$A_\mathrm{[OIII]5007\;Core}$' ,'init':(oiii5007_amp_init-total_flux_init),'pmin':0.0,'pmax':max_flux})
-    # [4] - Na. [OIII]5007 Core FWHM
-    mcmc_input.append({'name':'$\mathrm{FWHM}_\mathrm{[OIII]5007\;Core}$','init':250.,'pmin':0.0,'pmax':1000.})
-    # [5] - Na. [OIII]5007 Core VOFF
-    mcmc_input.append({'name':'$\mathrm{VOFF}_\mathrm{[OIII]5007\;Core}$','init':0.,'pmin':-1000.,'pmax':1000.})
-    # [6] - Br. [OIII]5007 Outflow amplitude
-    mcmc_input.append({'name':'$A_\mathrm{[OIII]5007\;Outflow}$' ,'init':(oiii5007_amp_init-total_flux_init)/2.,'pmin':0.0,'pmax':max_flux})
-    # [7] - Br. [OIII]5007 Outflow FWHM
-    mcmc_input.append({'name':'$\mathrm{FWHM}_\mathrm{[OIII]5007\;Outflow}$','init':450.,'pmin':0.0,'pmax':5000.})
-    # [8] - Br. [OIII]5007 Outflow VOFF
-    mcmc_input.append({'name':'$\mathrm{VOFF}_\mathrm{[OIII]5007\;Outflow}$','init':-50.,'pmin':-2000.,'pmax':2000.})
-    # Br. [OIII]4959 Outflow is tied to all components of [OIII]5007 outflow
-    # [9] - Na. H-beta amplitude
-    mcmc_input.append({'name':'$A_{\mathrm{Na.\;Hb}}$' ,'init':(hb_amp_init-total_flux_init) ,'pmin':0.0 ,'pmax':max_flux})
-    # Na. H-beta FWHM tied to [OIII]5007 FWHM
-    # [10] Na. H-beta VOFF
-    mcmc_input.append({'name':'$\mathrm{VOFF}_{\mathrm{Na.\;Hb}}$','init':0.,'pmin':-1000 ,'pmax':1000.})
-    # [11] - Br. H-beta amplitude
-    mcmc_input.append({'name':'$A_{\mathrm{Br.\;Hb}}$' ,'init':(hb_amp_init-total_flux_init)/2.0  ,'pmin':0.0,'pmax':max_flux})
-    # [12] - Br. H-beta FWHM
-    mcmc_input.append({'name':'$\mathrm{FWHM}_{\mathrm{Br.\;Hb}}$','init':2500.,'pmin':0.0,'pmax':10000.})
-    # [13] - Br. H-beta VOFF
-    mcmc_input.append({'name':'$\mathrm{VOFF}_{\mathrm{Br.\;Hb}}$','init':0.,'pmin':-1000. ,'pmax':1000.})
-
-    param_labels,params,param_limits,param_init = mcmc_structures(mcmc_input)
-    
-    return param_labels,params,param_limits,param_init
-    
-    ################################################################################    
-
-
-def initialize_mcmc_final_outflows(lam_gal,galaxy,templates,velscale):
-    ################################################################################
-    # Initial conditions for some parameters
-    max_flux = np.max(galaxy)
-    total_flux_init = np.median(galaxy[(lam_gal>5025.) & (lam_gal<5800.)])
-    # cont_flux_init = (0.5*np.median(galaxy))
-    feii_flux_init= (0.1*np.median(galaxy))
-    hb_amp_init= (np.max(galaxy[(lam_gal>4862-50) & (lam_gal<4862+50)]))
-    oiii5007_amp_init = (np.max(galaxy[(lam_gal>5007-50) & (lam_gal<5007+50)]))
-
-    # print('Total flux level: %0.2e' % total_flux_init)
-    # print('Continuum flux level: %0.2e' % cont_flux_init )
-    # print('FeII flux level: %0.2e' % feii_flux_init)
-    
-    ################################################################################
-    
-    mcmc_input = [] # array of parameter dicts
-    # [0] - Stellar velocity
-    mcmc_input.append({'name':'$V_*$','init':100. ,'pmin':-500. ,'pmax':500.})
-    # [1] - Stellar velocity dispersion
-    mcmc_input.append({'name':'$\sigma_*$','init':200.0,'pmin':30.0,'pmax':400.})
-    # [2] - AGN simple power-law slope
-    mcmc_input.append({'name':'$m_\mathrm{cont}$','init':0.0  ,'pmin':-4.0,'pmax':2.0})
-    # [3] - AGN simple power-law amplitude
-    mcmc_input.append({'name':'$A_\mathrm{cont}$','init':(0.01*total_flux_init),'pmin':0.0,'pmax':max_flux})
-    # [4] - Narrow FeII amplitude
-    mcmc_input.append({'name':'$A_\mathrm{Na\;FeII}$','init':feii_flux_init,'pmin':0.0,'pmax':total_flux_init})
-    # [5] - Broad FeII amplitude
-    mcmc_input.append({'name':'$A_\mathrm{Br\;FeII}$','init':feii_flux_init,'pmin':0.0,'pmax':total_flux_init})
-    # [6] - Na. [OIII]5007 Core Amplitude
-    mcmc_input.append({'name':'$A_\mathrm{[OIII]5007\;Core}$' ,'init':(oiii5007_amp_init-total_flux_init),'pmin':0.0,'pmax':max_flux})
-    # [7] - Na. [OIII]5007 Core FWHM
-    mcmc_input.append({'name':'$\mathrm{FWHM}_\mathrm{[OIII]5007\;Core}$','init':250.,'pmin':0.0,'pmax':1000.})
-    # [8] - Na. [OIII]5007 Core VOFF
-    mcmc_input.append({'name':'$\mathrm{VOFF}_\mathrm{[OIII]5007\;Core}$','init':0.,'pmin':-1000.,'pmax':1000.})
-    # [9] - Br. [OIII]5007 Outflow amplitude
-    mcmc_input.append({'name':'$A_\mathrm{[OIII]5007\;Outflow}$' ,'init':(oiii5007_amp_init-total_flux_init)/2.,'pmin':0.0,'pmax':max_flux})
-    # [10] - Br. [OIII]5007 Outflow FWHM
-    mcmc_input.append({'name':'$\mathrm{FWHM}_\mathrm{[OIII]5007\;Outflow}$','init':450.,'pmin':0.0,'pmax':5000.})
-    # [11] - Br. [OIII]5007 Outflow VOFF
-    mcmc_input.append({'name':'$\mathrm{VOFF}_\mathrm{[OIII]5007\;Outflow}$','init':-50.,'pmin':-2000.,'pmax':2000.})
-    # Br. [OIII]4959 Outflow is tied to all components of [OIII]5007 outflow
-    # [12] - Na. H-beta amplitude
-    mcmc_input.append({'name':'$A_{\mathrm{Na.\;Hb}}$' ,'init':(hb_amp_init-total_flux_init) ,'pmin':0.0 ,'pmax':max_flux})
-    # Na. H-beta FWHM tied to [OIII]5007 FWHM
-    # [13] Na. H-beta VOFF
-    mcmc_input.append({'name':'$\mathrm{VOFF}_{\mathrm{Na.\;Hb}}$','init':0.,'pmin':-1000 ,'pmax':1000.})
-    # [14] - Br. H-beta amplitude
-    mcmc_input.append({'name':'$A_{\mathrm{Br.\;Hb}}$' ,'init':(hb_amp_init-total_flux_init)/2.0  ,'pmin':0.0,'pmax':max_flux})
-    # [15] - Br. H-beta FWHM
-    mcmc_input.append({'name':'$\mathrm{FWHM}_{\mathrm{Br.\;Hb}}$','init':2500.,'pmin':0.0,'pmax':10000.})
-    # [16] - Br. H-beta VOFF
-    mcmc_input.append({'name':'$\mathrm{VOFF}_{\mathrm{Br.\;Hb}}$','init':0.,'pmin':-1000. ,'pmax':1000.})
-
-    param_names = ['vel','vel_disp',\
-                'cont_slope','cont_amp',\
-                'na_feii_amp',\
-                'br_feii_amp',\
-                'oiii5007_core_amp','oiii5007_core_fwhm','oiii5007_core_voff',\
-                'oiii5007_outflow_amp','oiii5007_outflow_fwhm','oiii5007_outflow_voff',\
-                'na_Hb_amp','na_Hb_voff',\
-                'br_Hb_amp','br_Hb_fwhm','br_Hb_voff']
-
-    param_labels,params,param_limits,param_init = mcmc_structures(mcmc_input)
-
-    ################################################################################
-
-    npix = galaxy.shape[0] # number of output pixels
-    ntemp = np.shape(templates)[1]# number of templates
-    
-    # Pre-compute FFT of templates, since they do not change (only the LOSVD and convolution changes)
-    temp_fft,npad = template_rfft(templates) # we will use this throughout the code
-    
-    
-    ################################################################################    
-    
-    return param_names,param_labels,params,param_limits,npix,ntemp,temp_fft,npad
-
-def initialize_mcmc_init_no_outflows(lam_gal,galaxy,velscale):
-    ################################################################################
-    # Initial conditions for some parameters
-    max_flux = np.max(galaxy)
-    total_flux_init = np.median(galaxy[(lam_gal>5025.) & (lam_gal<5800.)])
-    # cont_flux_init = 0.5*(np.median(galaxy))
-    feii_flux_init= (0.1*np.median(galaxy))
-    hb_amp_init= (np.max(galaxy[(lam_gal>4862-50) & (lam_gal<4862+50)]))
-    oiii5007_amp_init = (np.max(galaxy[(lam_gal>5007-50) & (lam_gal<5007+50)]))
-
-    # print('Total flux level: %0.2e' % total_flux_init)
-    # print('Continuum flux level: %0.2e' % cont_flux_init )
-    # print('FeII flux level: %0.2e' % feii_flux_init)
-    
-    ################################################################################
-    
-    mcmc_input = [] # array of parameter dicts
-    # [0] - Galaxy template amplitude
-    mcmc_input.append({'name':'$A_\mathrm{gal}$','init':(0.99*total_flux_init),'pmin':0.0,'pmax':max_flux})
-    # [1] - Narrow FeII amplitude
-    mcmc_input.append({'name':'$A_\mathrm{Na\;FeII}$','init':feii_flux_init,'pmin':0.0,'pmax':total_flux_init})
-    # [2] - Broad FeII amplitude
-    mcmc_input.append({'name':'$A_\mathrm{Br\;FeII}$','init':feii_flux_init,'pmin':0.0,'pmax':total_flux_init})
-    # [3] - Na. [OIII]5007 Core Amplitude
-    mcmc_input.append({'name':'$A_\mathrm{[OIII]5007\;Core}$' ,'init':(oiii5007_amp_init-total_flux_init),'pmin':0.0,'pmax':max_flux})
-    # [4] - Na. [OIII]5007 Core FWHM
-    mcmc_input.append({'name':'$\mathrm{FWHM}_\mathrm{[OIII]5007\;Core}$','init':250.,'pmin':0.0,'pmax':1000.})
-    # [5] - Na. [OIII]5007 Core VOFF
-    mcmc_input.append({'name':'$\mathrm{VOFF}_\mathrm{[OIII]5007\;Core}$','init':0.,'pmin':-1000.,'pmax':1000.})
-    # [6] - Na. H-beta amplitude
-    mcmc_input.append({'name':'$A_{\mathrm{Na.\;Hb}}$' ,'init':(hb_amp_init-total_flux_init) ,'pmin':0.0 ,'pmax':max_flux})
-    # Na. H-beta FWHM tied to [OIII]5007 FWHM
-    # [7] Na. H-beta VOFF
-    mcmc_input.append({'name':'$\mathrm{VOFF}_{\mathrm{Na.\;Hb}}$','init':0.,'pmin':-1000 ,'pmax':1000.})
-    # [8] - Br. H-beta amplitude
-    mcmc_input.append({'name':'$A_{\mathrm{Br.\;Hb}}$' ,'init':(hb_amp_init-total_flux_init)/2.0  ,'pmin':0.0,'pmax':max_flux})
-    # [9] - Br. H-beta FWHM
-    mcmc_input.append({'name':'$\mathrm{FWHM}_{\mathrm{Br.\;Hb}}$','init':2500.,'pmin':0.0,'pmax':10000.})
-    # [10] - Br. H-beta VOFF
-    mcmc_input.append({'name':'$\mathrm{VOFF}_{\mathrm{Br.\;Hb}}$','init':0.,'pmin':-1000. ,'pmax':1000.})
-
-    param_labels,params,param_limits,param_init = mcmc_structures(mcmc_input)
-    
-    return param_labels,params,param_limits,param_init
-    
-    ################################################################################    
-
-
-def initialize_mcmc_final_no_outflows(lam_gal,galaxy,templates,velscale):
-    ################################################################################
-    # Initial conditions for some parameters
-    max_flux = np.max(galaxy)
-    total_flux_init = np.median(galaxy[(lam_gal>5025.) & (lam_gal<5800.)])
-    # cont_flux_init = (0.5*np.median(galaxy))
-    feii_flux_init= (0.1*np.median(galaxy))
-    hb_amp_init= (np.max(galaxy[(lam_gal>4862-50) & (lam_gal<4862+50)]))
-    oiii5007_amp_init = (np.max(galaxy[(lam_gal>5007-50) & (lam_gal<5007+50)]))
-
-    # print('Total flux level: %0.2e' % total_flux_init)
-    # print('Continuum flux level: %0.2e' % cont_flux_init )
-    # print('FeII flux level: %0.2e' % feii_flux_init)
-    
-    ################################################################################
-    
-    mcmc_input = [] # array of parameter dicts
-    # [0] - Stellar velocity
-    mcmc_input.append({'name':'$V_*$','init':100. ,'pmin':-500. ,'pmax':500.})
-    # [1] - Stellar velocity dispersion
-    mcmc_input.append({'name':'$\sigma_*$','init':200.0,'pmin':30.0,'pmax':400.})
-    # [2] - AGN simple power-law slope
-    mcmc_input.append({'name':'$m_\mathrm{cont}$','init':0.0  ,'pmin':-4.0,'pmax':2.0})
-    # [3] - AGN simple power-law amplitude
-    mcmc_input.append({'name':'$A_\mathrm{cont}$','init':(0.01*total_flux_init),'pmin':0.0,'pmax':max_flux})
-    # [4] - Narrow FeII amplitude
-    mcmc_input.append({'name':'$A_\mathrm{Na\;FeII}$','init':feii_flux_init,'pmin':0.0,'pmax':total_flux_init})
-    # [5] - Broad FeII amplitude
-    mcmc_input.append({'name':'$A_\mathrm{Br\;FeII}$','init':feii_flux_init,'pmin':0.0,'pmax':total_flux_init})
-    # [6] - Na. [OIII]5007 Core Amplitude
-    mcmc_input.append({'name':'$A_\mathrm{[OIII]5007\;Core}$' ,'init':(oiii5007_amp_init-total_flux_init),'pmin':0.0,'pmax':max_flux})
-    # [7] - Na. [OIII]5007 Core FWHM
-    mcmc_input.append({'name':'$\mathrm{FWHM}_\mathrm{[OIII]5007\;Core}$','init':250.,'pmin':0.0,'pmax':1000.})
-    # [8] - Na. [OIII]5007 Core VOFF
-    mcmc_input.append({'name':'$\mathrm{VOFF}_\mathrm{[OIII]5007\;Core}$','init':0.,'pmin':-1000.,'pmax':1000.})
-    # [9] - Na. H-beta amplitude
-    mcmc_input.append({'name':'$A_{\mathrm{Na.\;Hb}}$' ,'init':(hb_amp_init-total_flux_init) ,'pmin':0.0 ,'pmax':max_flux})
-    # Na. H-beta FWHM tied to [OIII]5007 FWHM
-    # [10] Na. H-beta VOFF
-    mcmc_input.append({'name':'$\mathrm{VOFF}_{\mathrm{Na.\;Hb}}$','init':0.,'pmin':-1000 ,'pmax':1000.})
-    # [11] - Br. H-beta amplitude
-    mcmc_input.append({'name':'$A_{\mathrm{Br.\;Hb}}$' ,'init':(hb_amp_init-total_flux_init)/2.0  ,'pmin':0.0,'pmax':max_flux})
-    # [12] - Br. H-beta FWHM
-    mcmc_input.append({'name':'$\mathrm{FWHM}_{\mathrm{Br.\;Hb}}$','init':2500.,'pmin':0.0,'pmax':10000.})
-    # [13] - Br. H-beta VOFF
-    mcmc_input.append({'name':'$\mathrm{VOFF}_{\mathrm{Br.\;Hb}}$','init':0.,'pmin':-1000. ,'pmax':1000.})
-
-    param_names = ['vel','vel_disp',\
-                'cont_slope','cont_amp',\
-                'na_feii_amp',\
-                'br_feii_amp',\
-                'oiii5007_core_amp','oiii5007_core_fwhm','oiii5007_core_voff',\
-                'na_Hb_amp','na_Hb_voff',\
-                'br_Hb_amp','br_Hb_fwhm','br_Hb_voff']
-
-    param_labels,params,param_limits,param_init = mcmc_structures(mcmc_input)
-
-    ################################################################################
-
-    npix = galaxy.shape[0] # number of output pixels
-    ntemp = np.shape(templates)[1]# number of templates
-    
-    # Pre-compute FFT of templates, since they do not change (only the LOSVD and convolution changes)
-    temp_fft,npad = template_rfft(templates) # we will use this throughout the code
-    
-    
-    ################################################################################    
-    
-    return param_names,param_labels,params,param_limits,npix,ntemp,temp_fft,npad
-
-
-##################################################################################
-
-##################################################################################
-
-def mcmc_structures(mcmc_input):
-    """
-    Returns required array structures for MCMC algorithm.
-    
-    Parameters
-    ----------
-    params : array_like
-        An array containing each paramter dict.  Each 
-        parameter array is of the format
-        
-        param[i] = {name:,init:,pmin:,pmax:}
-        
-        where
-        
-        name:string
-            name of the parameter
-        init:float
-            initial value of parameter
-        pmin:float
-            minimum value of parameter space
-        pmax:float
-            maximum value of parameter space
-    
-    Returns
-    -------
-    param_names:array
-        the names of params
-    params:array
-        initial params which will be iteratively
-        updated.
-    param_limits:array
-        An array containing the min and max limits of each parameter to serve as a prior.
-    param_chain
-        An array containing the chains for each parameter.
-    """
-
-    param_labels = []
-    params      = []
-    param_min   = []
-    param_max   = []
-#     param_limits = []
-    param_init = []
-    for i in range(0,len(mcmc_input),1):
-        param_labels.append(mcmc_input[i]['name'])
-        params.append(mcmc_input[i]['init'])
-        param_min.append(mcmc_input[i]['pmin'])
-        param_max.append(mcmc_input[i]['pmax'])
-        param_init.append(mcmc_input[i]['init'])
-    
-    param_limits = np.array([param_min,param_max])
-        
-    return np.array(param_labels),np.array(params),np.array(param_limits),np.array(param_init)
-
-##################################################################################
-
-def simple_power_law(x,alpha,amp):
-    xb = np.max(x)-((np.max(x)-np.min(x))/2.0) # take to be half of the wavelength range
-    C = amp*(x/xb)**alpha # un-normalized
-    return C
-
-##################################################################################
-
-def gaussian(x,center,amp,fwhm,voff,velscale):
-    """
-    Produces a gaussian vector the length of
-    x with the specified parameters.
-    
-    Parameters
-    ----------
-    x : array_like
-        the wavelength vector in angstroms.
-    center: float
-        the mean or center wavelength of the gaussian in angstroms.
-    sigma: float
-        the standard deviation of the gaussian in km/s.
-    amp : float
-        the amplitude of the gaussian in flux units.
-    voff: the velocity offset (in km/s) from the rest-frame 
-          line-center (taken from SDSS rest-frame emission
-          line wavelengths)
-    velscale: velocity scale; km/s/pixel
-    Returns
-    -------
-    g: array3
-        a one-dimensional gaussian as a function of x,
-        where x is measured in PIXELS.
-    """
-    x_pix = range(len(x))
-    wave_interp = interp1d(x,x_pix,kind='cubic',bounds_error=False,fill_value=(0,0))
-    center_pix = wave_interp(center) # pixel value corresponding to line center
-    sigma = fwhm/2.3548
-    sigma_pix = sigma/velscale
-    voff_pix = voff/velscale
-    center_pix = center_pix + voff_pix
-    
-#     print center_pix,sigma_pix,voff_pix
-
-    g = amp*np.exp(-0.5*(x_pix-(center_pix))**2/(sigma_pix)**2)
-    
-    # Make sure edges of gaussian are zero 
-    if (g[0]>1.0e-6) or g[-1]>1.0e-6:
-        g = np.zeros(len(g))
-    
-    return g
-
-##################################################################################
-
-def initialize_feii(lam_gal,velscale):
-    # Read in template data
-    na_feii_table = pd.read_csv('badass_data_files/na_feii_template.csv')
-    br_feii_table = pd.read_csv('badass_data_files/br_feii_template.csv')
-
-    # Construct the FeII templates here (do not reconstruct them for every iteration; only amplitude is changing)
-    # Initialize the templates with a given guess for the amplitude; we take 10% of the median flux
-    feii_voff = 0.0 # velocity offset
-    na_feii_amp = 1.0
-    na_feii_rel_int  = np.array(na_feii_table['na_relative_intensity'])
-    na_feii_center = np.array(na_feii_table['na_wavelength'])
-    na_feii_fwhm = 500.0 # km/s; keep fixed
-    br_feii_amp = 1.0
-    br_feii_rel_int  = np.array(br_feii_table['br_relative_intensity'])
-    br_feii_center = np.array(br_feii_table['br_wavelength'])
-    br_feii_fwhm = 3000.0 # km/s; keep fixed    
-    na_feii_template = feii_template(lam_gal,na_feii_rel_int,na_feii_center,na_feii_amp,na_feii_fwhm,feii_voff,velscale)
-    br_feii_template = feii_template(lam_gal,br_feii_rel_int,br_feii_center,br_feii_amp,br_feii_fwhm,feii_voff,velscale)
-    
-    return na_feii_template, br_feii_template
-
-def feii_template(lam,rel_int,center,amp,sigma,voff,velscale):
-
-    """
-    Produces a gaussian vector the length of
-    x with the specified parameters.
-    
-    Parameters
-    ----------
-    x : array_like
-        the wavelength vector
-    A : float
-        the amplitude of the gaussian.
-    center: float
-        the mean or center wavelength of the gaussian.
-    sigma: float
-        the standard deviation of the gaussian.
-    
-    Returns
-    -------
-    g: array
-        a one-dimensional gaussian as a function of x.
-    """
-    # Create an empty array in which to store the lines before summing them
-    template = []
-    for i in range(0,len(rel_int),1):
-        line = amp*(gaussian(lam,center[i],rel_int[i],sigma,voff,velscale))
-        template.append(line)
-    template = np.sum(template,axis=0)
-    
-    return template
-
-##################################################################################
-
-# This function is used if we use the Maraston et al. 2009 SDSS composite templates but the absorption
-# features are not deep enough to describe NLS1s.
-# def galaxy_template(lam,age=5):
-#     if (age<1) or (age>15):
-#         print(' You must choose an age between (1 Gyr <= age <= 15 Gyr)!')
-#         sys.exit()
-#     else:
-#         # We use the SDSS template from Maraston et al. 2009 
-#         # The template is used as a placeholder for the stellar continuum
-#         # in the initial parameter fit.
-#         # Open the file and get the appropriate age galaxy (default age=5 Gyr)
-#         df = pd.read_csv('badass_data_files/M09_composite_bestfitLRG.csv',skiprows=5,sep=',',names=['t_Gyr','AA','flam'])
-#         wave =  np.array(df.loc[(df['t_Gyr']==age),'AA'])
-#         flux =  np.array(df.loc[(df['t_Gyr']==age),'flam'])
-#         # Interpolate the template 
-#         gal_interp = interp1d(wave,flux,kind='cubic',bounds_error=False,fill_value=(0,0))
-#         gal_temp = gal_interp(lam)
-#         # Normalize by median
-#         gal_temp = gal_temp/np.median(gal_temp)
-#         return gal_temp
-
-def galaxy_template(lam):
-    # We use the SDSS template from Maraston et al. 2009 
-    # The template is used as a placeholder for the stellar continuum
-    # in the initial parameter fit.
-    # Open the file and get the appropriate age galaxy (default age=5 Gyr)
-    df = pd.read_csv('badass_data_files/nls1_template.csv',skiprows=1,sep=',',names=['wave','flux'])
-
-    if 1: sys.exit
-    wave =  np.array(df['wave'])
-    flux =  np.array(df['flux'])
-    # Interpolate the template 
-    gal_interp = interp1d(wave,flux,kind='cubic',bounds_error=False,fill_value=(flux[0],flux[-1]))
-    gal_temp = gal_interp(lam)
-    # Normalize by median
-    gal_temp = gal_temp/np.median(gal_temp)
-    return gal_temp
-
-##################################################################################
-
-def init_outflow_model(pars,lam,fwhm_gal,na_feii_template,br_feii_template,gal_temp,velscale,galaxy,run_dir,output_model=False):    
-    """
-    Used for estimating initial paramters using maximum likelihood estimation.
-    - omits the stellar continuum fit for simplicity
-    """
-
-    def find_nearest_gal_model(array, value):
-        array = np.asarray(array)
-        idx = (np.abs(array - value)).argmin()
-        return array[idx],idx
-
-    # Free-parameters (14 total):
-    #------------------------------------------
-    # [0] - Galaxy template amplitude
-    # [1] - Narrow FeII amplitude
-    # [2] - Broad FeII amplitude
-    # [3] - Na. [OIII]5007 Core Amplitude
-    # [4] - Na. [OIII]5007 Core FWHM
-    # [5] - Na. [OIII]5007 Core VOFF
-    # [6] - Br. [OIII]5007 Outflow amplitude
-    # [7] - Br. [OIII]5007 Outflow FWHM
-    # [8] - Br. [OIII]5007 Outflow VOFF
-    #      - Br. [OIII]4959 Outflow and Na. H-beta outflows are tied to [OIII]5007 outflow
-    # [9] - Na. H-beta amplitude
-    #      - Na. H-beta FWHM tied to [OIII]5007
-    # [10] - Na. H-beta VOFF
-    # [11] - Br. H-beta amplitude
-    # [12] - Br. H-beta FWHM
-    # [13] - Br. H-beta VOFF
-
-    ############################# Host-galaxy Component ######################################################
-    gal_temp = pars[0]*gal_temp
-    host_model = (galaxy) - (gal_temp) # Subtract off continuum from galaxy, since we only want template weights to be fit
-    ########################################################################################################    
-    
-    ############################# Fe II Component ##########################################################
-    # Create template model for narrow and broad FeII emission 
-    # idx 4 = na_feii_amp, idx 5 = br_feii_amp
-    na_feii_amp  = pars[1]
-    br_feii_amp  = pars[2]
-
-    na_feii_template = na_feii_amp*na_feii_template
-    br_feii_template = br_feii_amp*br_feii_template
-
-    # If including FeII templates, initialize them here
-    # na_feii_template,br_feii_template = initialize_feii(lam,velscale,pars[4],pars[5])
-
-    host_model = (host_model) - (na_feii_template) - (br_feii_template)
-    ########################################################################################################
-
-    ############################# Emission Lines Component #################################################    
-    # Create a template model for emission lines
-    # Narrow [OIII]5007 Core; (6,7,8)=(voff,fwhm,amp)
-    na_oiii5007_center = 5008.240 # Angstroms
-    na_oiii5007_amp  = pars[3] # flux units
-    na_oiii5007_res = fwhm_gal[find_nearest_gal_model(lam,na_oiii5007_center)[1]]*300000./na_oiii5007_center # instrumental fwhm resolution at this line
-    na_oiii5007_fwhm = np.sqrt(pars[4]**2+(na_oiii5007_res)**2) # km/s
-    na_oiii5007_voff = pars[5]  # km/s
-    na_oiii5007 = gaussian(lam,na_oiii5007_center,na_oiii5007_amp,na_oiii5007_fwhm,na_oiii5007_voff,velscale)
-
-    # Narrow [OIII]4959 Core; (6,7,9)=(voff,fwhm,amp)
-    na_oiii4959_center = 4960.295 # Angstroms
-    na_oiii4959_amp  = (1.0/3.0)*pars[3] # flux units
-    na_oiii4959_fwhm = na_oiii5007_fwhm # km/s
-    na_oiii4959_voff = na_oiii5007_voff  # km/s
-    na_oiii4959 = gaussian(lam,na_oiii4959_center,na_oiii4959_amp,na_oiii4959_fwhm,na_oiii4959_voff,velscale)
-
-    # Broad [OIII]5007 Outflow; (10,11,12)=(voff,fwhm,amp)
-    br_oiii5007_center = 5008.240 # Angstroms
-    br_oiii5007_amp  = pars[6] # flux units
-    br_oiii5007_fwhm = np.sqrt(pars[7]**2+(na_oiii5007_res)**2) # km/s
-    br_oiii5007_voff = pars[8]  # km/s
-    br_oiii5007 = gaussian(lam,br_oiii5007_center,br_oiii5007_amp,br_oiii5007_fwhm,br_oiii5007_voff,velscale)
-
-    # Broad [OIII]4959 Outflow; (10,11,?)=(voff,fwhm,amp)
-    br_oiii4959_center = 4960.295 # Angstroms
-    br_oiii4959_amp  = br_oiii5007_amp*na_oiii4959_amp/na_oiii5007_amp # flux units
-    br_oiii4959_fwhm = br_oiii5007_fwhm # km/s
-    br_oiii4959_voff = br_oiii5007_voff  # km/s
-    if (br_oiii4959_amp!=br_oiii4959_amp/1.0) or (br_oiii4959_amp==np.inf): br_oiii4959_amp=0.0
-    br_oiii4959 = gaussian(lam,br_oiii4959_center,br_oiii4959_amp,br_oiii4959_fwhm,br_oiii4959_voff,velscale)
-
-    # Narrow H-beta; (13,,14)=(voff,fwhm,amp)
-    na_hb_center = 4862.68 # Angstroms
-    na_hb_res = fwhm_gal[find_nearest_gal_model(lam,na_hb_center)[1]]*300000./na_hb_center # instrumental fwhm resolution at this line
-    na_hb_amp  = pars[9] # flux units
-    na_hb_fwhm = np.sqrt(na_oiii5007_fwhm**2+(na_hb_res)**2) # km/s
-    na_hb_voff = pars[10]  # km/s
-    na_Hb = gaussian(lam,na_hb_center,na_hb_amp,na_hb_fwhm,na_hb_voff,velscale)
-
-    # Broad H-beta; (15,16,17)=(voff,fwhm,amp)
-    na_hb_center = 4862.68 # Angstroms
-    br_hb_amp  = pars[11] # flux units
-    br_hb_res = fwhm_gal[find_nearest_gal_model(lam,na_hb_center)[1]]*300000./na_hb_center # instrumental fwhm resolution at this line
-    br_hb_fwhm = np.sqrt(pars[12]**2+(br_hb_res)**2) # km/s
-    br_hb_voff = pars[13]  # km/s
-    br_Hb = gaussian(lam,na_hb_center,br_hb_amp,br_hb_fwhm,br_hb_voff,velscale)
-
-    # Broad H-beta Outflow; only a model, no free parameters, tied to [OIII]5007
-    br_hb_outflow_amp =  br_oiii5007_amp*na_hb_amp/na_oiii5007_amp
-    br_hb_outflow_fwhm = np.sqrt(br_oiii5007_fwhm**2+(br_hb_res)**2) # km/s
-    br_hb_outflow_voff = na_hb_voff+br_oiii5007_voff
-    if (br_hb_outflow_amp!=br_hb_outflow_amp/1.0) or (br_hb_outflow_amp==np.inf): br_hb_outflow_amp=0.0
-    br_Hb_outflow = gaussian(lam,na_hb_center,br_hb_outflow_amp,br_hb_outflow_fwhm,br_hb_outflow_voff,velscale)
-
-    host_model = (host_model) - (br_Hb) - (na_Hb) - (br_Hb_outflow) - (na_oiii4959) - (br_oiii4959) - (na_oiii5007)  - (br_oiii5007)
-
-    ########################################################################################################
-    
-    # The final model 
-    gmodel = (gal_temp) + (na_feii_template) + (br_feii_template) + (br_Hb) + (na_Hb)\
-     + (br_Hb_outflow) + (na_oiii4959) + (br_oiii4959) + (na_oiii5007)  + (br_oiii5007)
-
-    if output_model==False:
-        return gmodel
-    elif output_model==True: # output all models
-        allmodels = [gal_temp,na_feii_template,br_feii_template,\
-                    br_Hb,na_Hb,na_oiii4959,na_oiii5007,br_oiii4959,br_oiii5007,br_Hb_outflow]
-
-        best_model_outflows = (gmodel,allmodels)
-        # Plot the model+galaxy
-        fig1 = plt.figure(figsize=(14,6)) 
-        ax1  = fig1.add_subplot(2,1,1)
-        ax2  = fig1.add_subplot(2,1,2)
-        ax1.plot(lam,galaxy,linewidth=1.0,color='black',label='Galaxy')
-        ax1.plot(lam,best_model_outflows[0],linewidth=1.0,color='red',label='Outflow Model')
-        ax1.plot(lam,best_model_outflows[1][0],linewidth=1.0,color='limegreen',label='Host-galaxy')
-        ax1.plot(lam,best_model_outflows[1][1],linewidth=1.0,color='orange',label='Na. FeII')
-        ax1.plot(lam,best_model_outflows[1][2],linewidth=1.0,color='darkorange',label='Br. FeII')
-        ax1.plot(lam,best_model_outflows[1][3],linewidth=1.0,color='blue',label='Broad')
-        ax1.plot(lam,best_model_outflows[1][4],linewidth=1.0,color='dodgerblue',label='Narrow')
-        ax1.plot(lam,best_model_outflows[1][5],linewidth=1.0,color='dodgerblue',label='')
-        ax1.plot(lam,best_model_outflows[1][6],linewidth=1.0,color='dodgerblue')
-        ax1.plot(lam,best_model_outflows[1][7],linewidth=1.0,color='orangered',label='Outflow')
-        ax1.plot(lam,best_model_outflows[1][8],linewidth=1.0,color='orangered')
-        ax1.plot(lam,best_model_outflows[1][9],linewidth=1.0,color='orangered')
-        # Perform robust sigma clipping to get a good noise value
-        resid_outflow = (galaxy-best_model_outflows[0])
-        # sig_clip_resid_outflow = sigma_clip(resid_outflow,sigma=3)
-        # outflow_std = round(mad_std(sig_clip_resid_outflow),2)
-        outflow_std = round(mad_std(resid_outflow),2)
-        # ax2.plot(lam,sig_clip_resid_outflow,linewidth=1.0,color='black',label=r'Residuals, $\sigma=%0.3f$' % outflow_std)
-        ax2.plot(lam,resid_outflow,linewidth=1.0,color='black',label=r'Residuals, $\sigma=%0.3f$' % outflow_std)
-        ax1.set_ylim(0.0,np.max(np.max([galaxy,best_model_outflows[0]])+(3*outflow_std)))
-        ax2.set_ylim(np.min(resid_outflow)-(3*outflow_std),np.max(np.max([galaxy,best_model_outflows[0]])+(3*outflow_std)))
-        ax2.axhline(0.0,color='black',linestyle='--')
-        ax2.axhline(outflow_std,color='red',linestyle='--',linewidth=0.5)
-        ax2.axhline(-outflow_std,color='red',linestyle='--',linewidth=0.5)
-        ax1.set_xlim(np.min(lam),np.max(lam))
-        ax2.set_xlim(np.min(lam),np.max(lam))
-        ax1.legend(loc='upper right')
-        ax2.legend(loc='upper right')
-        plt.savefig(run_dir+'outflow_model.pdf',dpi=300,fmt='pdf')
-
-        return outflow_std#, best_model_outflows[0]
-
-# def outflow_monte_carlo(outflow_std, best_model,best_pars,params,param_limits,args,niter=1000):
-#     # args = (lam_gal,fwhm_gal,na_feii_template,br_feii_template,gal_temp,velscale,galaxy,noise,run_dir)
-#     lam_gal,fwhm_gal,na_feii_template,br_feii_template,gal_temp,velscale,galaxy,noise,run_dir = args
-#     mask = np.where((lam_gal > 4700.) & (lam_gal < 5100.))
-#     result = np.zeros((niter,len(best_pars))) # This will store the results
-#     # print(' Running MC iterations...')
-#     for j in range(niter):
-#         print(' Running MC iteration %d of %d.' % (j+1,niter))
-#         galaxy = best_model[mask]
-#         n = np.random.normal(loc=0,scale=1.0*outflow_std,size=np.shape(galaxy))
-#         new_galaxy = np.array(galaxy+n)
-#         args = (lam_gal[mask],fwhm_gal[mask],na_feii_template[mask],br_feii_template[mask],gal_temp[mask],velscale,new_galaxy[mask],noise[mask],run_dir)
-#         result_outflows = max_likelihood_outflows(best_pars,param_limits,args)
-#         print result_outflows['x']
-
-    
-#     return galaxy,n
-        # result[j,:] = pp.sol
-
-
-def final_outflow_model(pars,lam,fwhm_gal,na_feii_template,br_feii_template,temp_fft,npad,velscale,npix,vsyst,galaxy,temp_list,run_dir,move_temp=False,output_model=False): 	
-    """
-    Constructs galaxy model by convolving templates with a LOSVD given by 
-    a specified set of velocity parameters. 
-    
-    Parameters:
-        pars: parameters of Markov-chain
-        lam: wavelength vector used for continuum model
-        temp_fft: the Fourier-transformed templates
-        npad: 
-        velscale: the velocity scale in km/s/pixel
-        npix: number of output pixels; must be same as galaxy
-        vsyst: dv; the systematic velocity fr
-    """
-
-    def find_nearest_gal_model(array, value):
-        array = np.asarray(array)
-        idx = (np.abs(array - value)).argmin()
-        return array[idx],idx
-
-    # Free-parameters (17 total):
-    #------------------------------------------
-    # [0] - Stellar velocity
-    # [1] - Stellar velocity dispersion
-    # [2] - AGN simple power-law slope
-    # [3] - AGN simple power-law amplitude
-    # [4] - Narrow FeII amplitude
-    # [5] - Broad FeII amplitude
-    # [6] - Na. [OIII]5007 Core Amplitude
-    # [7] - Na. [OIII]5007 Core FWHM
-    # [8] - Na. [OIII]5007 Core VOFF
-    # [9] - Br. [OIII]5007 Outflow amplitude
-    # [10] - Br. [OIII]5007 Outflow FWHM
-    # [11] - Br. [OIII]5007 Outflow VOFF
-    #      - Br. [OIII]4959 Outflow and Na. H-beta outflows are tied to [OIII]5007 outflow
-    # [12] - Na. H-beta amplitude
-    #      - Na. H-beta FWHM tied to [OIII]5007
-    # [13] - Na. H-beta VOFF
-    # [14] - Br. H-beta amplitude
-    # [15] - Br. H-beta FWHM
-    # [16] - Br. H-beta VOFF
-
-    ############################# Power-law Component ######################################################
-    # Create a template model for the power-law continuum
-    cont = simple_power_law(lam,pars[2],pars[3]) # ind 2 = alpha, ind 3 = amplitude
-    host_model = galaxy - cont # Subtract off continuum from galaxy, since we only want template weights to be fit
-    ########################################################################################################
-    
-    ############################# Fe II Component ##########################################################
-    # Create template model for narrow and broad FeII emission 
-    # idx 4 = na_feii_amp, idx 5 = br_feii_amp
-    na_feii_amp  = pars[4]
-    br_feii_amp  = pars[5]
-
-    na_feii_template = na_feii_amp*na_feii_template
-    br_feii_template = br_feii_amp*br_feii_template
-
-    # If including FeII templates, initialize them here
-    # na_feii_template,br_feii_template = initialize_feii(lam,velscale,pars[4],pars[5])
-
-    host_model = host_model - (na_feii_template) - (br_feii_template)
-    ########################################################################################################
-
-    ############################# Emission Lines Component #################################################    
-    # Create a template model for emission lines
-    # Narrow [OIII]5007 Core; (6,7,8)=(voff,fwhm,amp)
-    na_oiii5007_center = 5008.240 # Angstroms
-    na_oiii5007_amp  = pars[6] # flux units
-    na_oiii5007_res = fwhm_gal[find_nearest_gal_model(lam,na_oiii5007_center)[1]]*300000./na_oiii5007_center # instrumental fwhm resolution at this line
-    na_oiii5007_fwhm = np.sqrt(pars[7]**2+(na_oiii5007_res)**2) # km/s
-    na_oiii5007_voff = pars[8]  # km/s
-    na_oiii5007 = gaussian(lam,na_oiii5007_center,na_oiii5007_amp,na_oiii5007_fwhm,na_oiii5007_voff,velscale)
-
-    # Narrow [OIII]4959 Core; (6,7,9)=(voff,fwhm,amp)
-    na_oiii4959_center = 4960.295 # Angstroms
-    na_oiii4959_amp  = (1.0/3.0)*pars[6] # flux units
-    na_oiii4959_fwhm = na_oiii5007_fwhm # km/s
-    na_oiii4959_voff = na_oiii5007_voff  # km/s
-    na_oiii4959 = gaussian(lam,na_oiii4959_center,na_oiii4959_amp,na_oiii4959_fwhm,na_oiii4959_voff,velscale)
-
-    # Broad [OIII]5007 Outflow; (10,11,12)=(voff,fwhm,amp)
-    br_oiii5007_center = 5008.240 # Angstroms
-    br_oiii5007_amp  = pars[9] # flux units
-    br_oiii5007_fwhm = np.sqrt(pars[10]**2+(na_oiii5007_res)**2) # km/s
-    br_oiii5007_voff = pars[11]  # km/s
-    br_oiii5007 = gaussian(lam,br_oiii5007_center,br_oiii5007_amp,br_oiii5007_fwhm,br_oiii5007_voff,velscale)
-
-    # Broad [OIII]4959 Outflow; (10,11,?)=(voff,fwhm,amp)
-    br_oiii4959_center = 4960.295 # Angstroms
-    br_oiii4959_amp  = br_oiii5007_amp*na_oiii4959_amp/na_oiii5007_amp # flux units
-    br_oiii4959_fwhm = br_oiii5007_fwhm # km/s
-    br_oiii4959_voff = br_oiii5007_voff  # km/s
-    if (br_oiii4959_amp!=br_oiii4959_amp/1.0) or (br_oiii4959_amp==np.inf): br_oiii4959_amp=0.0
-    br_oiii4959 = gaussian(lam,br_oiii4959_center,br_oiii4959_amp,br_oiii4959_fwhm,br_oiii4959_voff,velscale)
-
-    # Narrow H-beta; (13,,14)=(voff,fwhm,amp)
-    na_hb_center = 4862.68 # Angstroms
-    na_hb_res = fwhm_gal[find_nearest_gal_model(lam,na_hb_center)[1]]*300000./na_hb_center # instrumental fwhm resolution at this line
-    na_hb_amp  = pars[12] # flux units
-    na_hb_fwhm = np.sqrt(na_oiii5007_fwhm**2+(na_hb_res)**2) # km/s
-    na_hb_voff = pars[13]  # km/s
-    na_Hb = gaussian(lam,na_hb_center,na_hb_amp,na_hb_fwhm,na_hb_voff,velscale)
-
-    # Broad H-beta; (15,16,17)=(voff,fwhm,amp)
-    na_hb_center = 4862.68 # Angstroms
-    br_hb_amp  = pars[14] # flux units
-    br_hb_res = fwhm_gal[find_nearest_gal_model(lam,na_hb_center)[1]]*300000./na_hb_center # instrumental fwhm resolution at this line
-    br_hb_fwhm = np.sqrt(pars[15]**2+(br_hb_res)**2) # km/s
-    br_hb_voff = pars[16]  # km/s
-    br_Hb = gaussian(lam,na_hb_center,br_hb_amp,br_hb_fwhm,br_hb_voff,velscale)
-
-    # Broad H-beta Outflow; only a model, no free parameters, tied to [OIII]5007
-    br_hb_outflow_amp =  br_oiii5007_amp*na_hb_amp/na_oiii5007_amp
-    br_hb_outflow_fwhm = np.sqrt(br_oiii5007_fwhm**2+(br_hb_res)**2) # km/s
-    br_hb_outflow_voff = na_hb_voff+br_oiii5007_voff
-    if (br_hb_outflow_amp!=br_hb_outflow_amp/1.0) or (br_hb_outflow_amp==np.inf): br_hb_outflow_amp=0.0
-    br_Hb_outflow = gaussian(lam,na_hb_center,br_hb_outflow_amp,br_hb_outflow_fwhm,br_hb_outflow_voff,velscale)
-
-    host_model = (host_model) - (br_Hb) - (na_Hb) - (br_Hb_outflow) - (na_oiii4959) - (br_oiii4959) - (na_oiii5007)  - (br_oiii5007)
-
-    ########################################################################################################
-    
-    ############################# Host-galaxy Component ####################################################    
-    # Convolve the templates with a LOSVD
-    losvd_params = [pars[0],pars[1]] # ind 0 = velocity*, ind 1 = sigma*
-    conv_temp = convolve_gauss_hermite(temp_fft,npad,float(velscale),\
-                losvd_params,npix,velscale_ratio=1,sigma_diff=0,vsyst=vsyst)
-    
-    # Fitted weights of all templates using Non-negative Least Squares (NNLS)
-#     host_model = galaxy
-    weights = nnls(conv_temp,host_model)
-
-    if move_temp==True:
-        # Templates that are used are placed in templates folder
-        def path_leaf(path):
-            head, tail = ntpath.split(path)
-            return tail or ntpath.basename(head)
-
-        a =  np.where(weights>0)[0]
-        for i in a:
-            s = temp_list[i]
-            temp_name = path_leaf(temp_list[i])
-            if os.path.exists(run_dir+'templates/'+temp_name)==False:
-                # Check if template file was already copied to template folder
-                # If not, copy it to templates folder for each object
-                print(' Moving template %s' % temp_name)
-                shutil.copyfile(temp_list[i],run_dir+'templates/'+temp_name)
-
-
-    # if 1: sys.exit()
-
-    ########################################################################################################
-    
-    # The final model is sum(stellar templates*weights) + continuum model
-    gmodel = (np.sum(weights*conv_temp,axis=1)) + cont + (na_feii_template) + (br_feii_template) + (br_Hb) + (na_Hb)\
-     + (br_Hb_outflow) + (na_oiii4959) + (br_oiii4959) + (na_oiii5007)  + (br_oiii5007)
-
-    ########################## Measure Emission Line Fluxes #################################################
-
-    na_feii_flux       = simps(na_feii_template,lam)
-    br_feii_flux       = simps(br_feii_template,lam)
-    br_Hb_flux         = simps(br_Hb,lam)
-    na_Hb_flux         = simps(na_Hb,lam)
-    br_Hb_outflow_flux = simps(br_Hb_outflow,lam)
-    na_oiii4959_flux   = simps(na_oiii4959,lam)
-    br_oiii4959_flux   = simps(br_oiii4959,lam)
-    na_oiii5007_flux   = simps(na_oiii5007,lam)
-    br_oiii5007_flux   = simps(br_oiii5007,lam)
-    # Put em_line_fluxes into dataframe
-    em_line_fluxes = {'na_feii_flux':[na_feii_flux],'br_feii_flux':[br_feii_flux],'br_Hb_flux':[br_Hb_flux],'na_Hb_flux':[na_Hb_flux],\
-    'br_Hb_outflow_flux':[br_Hb_outflow_flux],'na_oiii4959_flux':[na_oiii4959_flux],'br_oiii4959_flux':[br_oiii4959_flux],\
-    'na_oiii5007_flux':[na_oiii5007_flux],'br_oiii5007_flux':[br_oiii5007_flux]}
-    em_line_cols = ['na_feii_flux','br_feii_flux','br_Hb_flux','na_Hb_flux','br_Hb_outflow_flux','na_oiii4959_flux','br_oiii4959_flux','na_oiii5007_flux','br_oiii5007_flux']
-    df_fluxes = pd.DataFrame(data=em_line_fluxes,columns=em_line_cols)
-
-    # Write to csv
-    # Create a folder in the working directory to save plots and data to
-    if os.path.exists(run_dir+'em_line_fluxes.csv')==False:
-    #     # If file has not been created, create it 
-        # print(' File does not exist!')
-        df_fluxes.to_csv(run_dir+'em_line_fluxes.csv',sep=',')
-    if os.path.exists(run_dir+'em_line_fluxes.csv')==True:
-    #     # If file has been created, append df_fluxes to existing file
-        # print( ' File exists!')
-        with open(run_dir+'em_line_fluxes.csv', 'a') as f:
-            df_fluxes.to_csv(f, header=False)
-
-
-    # if 1: sys.exit()
-    ########################################################################################################
-
-    if output_model==False:
-    	return gmodel
-    elif output_model==True: # output all models
-    	allmodels = [np.sum(weights*conv_temp,axis=1),cont,na_feii_template,br_feii_template,\
-                    br_Hb,na_Hb,na_oiii4959,na_oiii5007,br_oiii4959,br_oiii5007,br_Hb_outflow]
-    	return gmodel,allmodels,weights
-
-##################################################################################
-
-def init_no_outflow_model(pars,lam,fwhm_gal,na_feii_template,br_feii_template,gal_temp,velscale,galaxy,run_dir,output_model=False):    
-    """
-    Used for estimating initial paramters using maximum likelihood estimation.
-    - omits the stellar continuum fit for simplicity
-    """
-
-    def find_nearest_gal_model(array, value):
-        array = np.asarray(array)
-        idx = (np.abs(array - value)).argmin()
-        return array[idx],idx
-
-    # Free-parameters (13 total):
-    #------------------------------------------
-    # [0] - Galaxy template amplitude    
-    # [1] - Narrow FeII amplitude
-    # [2] - Broad FeII amplitude
-    # [3] - Na. [OIII]5007 Core Amplitude
-    # [4] - Na. [OIII]5007 Core FWHM
-    # [5] - Na. [OIII]5007 Core VOFF
-    # [6] - Na. H-beta amplitude
-    #      - Na. H-beta FWHM tied to [OIII]5007
-    # [7] - Na. H-beta VOFF
-    # [8] - Br. H-beta amplitude
-    # [9] - Br. H-beta FWHM
-    # [10] - Br. H-beta VOFF
-
-    ############################# Host-galaxy Component ######################################################
-    gal_temp = pars[0]*gal_temp
-    host_model = (galaxy) - (gal_temp) # Subtract off continuum from galaxy, since we only want template weights to be fit
-    ########################################################################################################   
-    
-    ############################# Fe II Component ##########################################################
-    # Create template model for narrow and broad FeII emission 
-    # idx 4 = na_feii_amp, idx 5 = br_feii_amp
-    na_feii_amp  = pars[1]
-    br_feii_amp  = pars[2]
-
-    na_feii_template = na_feii_amp*na_feii_template
-    br_feii_template = br_feii_amp*br_feii_template
-
-    # If including FeII templates, initialize them here
-    # na_feii_template,br_feii_template = initialize_feii(lam,velscale,pars[4],pars[5])
-
-    host_model = (host_model) - (na_feii_template) - (br_feii_template)
-    ########################################################################################################
-
-    ############################# Emission Lines Component #################################################    
-    # Create a template model for emission lines
-    # Narrow [OIII]5007 Core; (6,7,8)=(voff,fwhm,amp)
-    na_oiii5007_center = 5008.240 # Angstroms
-    na_oiii5007_amp  = pars[3] # flux units
-    na_oiii5007_res = fwhm_gal[find_nearest_gal_model(lam,na_oiii5007_center)[1]]*300000./na_oiii5007_center # instrumental fwhm resolution at this line
-    na_oiii5007_fwhm = np.sqrt(pars[4]**2+(na_oiii5007_res)**2) # km/s
-    na_oiii5007_voff = pars[5]  # km/s
-    na_oiii5007 = gaussian(lam,na_oiii5007_center,na_oiii5007_amp,na_oiii5007_fwhm,na_oiii5007_voff,velscale)
-
-    # Narrow [OIII]4959 Core; (6,7,9)=(voff,fwhm,amp)
-    na_oiii4959_center = 4960.295 # Angstroms
-    na_oiii4959_amp  = (1.0/3.0)*pars[3] # flux units
-    na_oiii4959_fwhm = na_oiii5007_fwhm # km/s
-    na_oiii4959_voff = na_oiii5007_voff  # km/s
-    na_oiii4959 = gaussian(lam,na_oiii4959_center,na_oiii4959_amp,na_oiii4959_fwhm,na_oiii4959_voff,velscale)
-
-    # Narrow H-beta; (13,,14)=(voff,fwhm,amp)
-    na_hb_center = 4862.68 # Angstroms
-    na_hb_res = fwhm_gal[find_nearest_gal_model(lam,na_hb_center)[1]]*300000./na_hb_center # instrumental fwhm resolution at this line
-    na_hb_amp  = pars[6] # flux units
-    na_hb_fwhm = np.sqrt(na_oiii5007_fwhm**2+(na_hb_res)**2) # km/s
-    na_hb_voff = pars[7]  # km/s
-    na_Hb = gaussian(lam,na_hb_center,na_hb_amp,na_hb_fwhm,na_hb_voff,velscale)
-
-    # Broad H-beta; (15,16,17)=(voff,fwhm,amp)
-    na_hb_center = 4862.68 # Angstroms
-    br_hb_amp  = pars[8] # flux units
-    br_hb_res = fwhm_gal[find_nearest_gal_model(lam,na_hb_center)[1]]*300000./na_hb_center # instrumental fwhm resolution at this line
-    br_hb_fwhm = np.sqrt(pars[9]**2+(br_hb_res)**2) # km/s
-    br_hb_voff = pars[10]  # km/s
-    br_Hb = gaussian(lam,na_hb_center,br_hb_amp,br_hb_fwhm,br_hb_voff,velscale)
-
-    host_model = (host_model) - (br_Hb) - (na_Hb) - (na_oiii4959) - (na_oiii5007) 
-
-    ########################################################################################################
-    
-    # The final model 
-    gmodel = (gal_temp) + (na_feii_template) + (br_feii_template) + (br_Hb) + (na_Hb)\
-     + (na_oiii4959) + (na_oiii5007) 
-
-    if output_model==False:
-        return gmodel
-    elif output_model==True: # output all models
-        allmodels = [gal_temp,na_feii_template,br_feii_template,\
-                    br_Hb,na_Hb,na_oiii4959,na_oiii5007]
-
-        best_model_no_outflows = (gmodel,allmodels)
-        # Plot the model+galaxy
-        fig1 = plt.figure(figsize=(14,6)) 
-        ax1  = plt.subplot(2,1,1)
-        ax2  = plt.subplot(2,1,2)
-        ax1.plot(lam,galaxy,linewidth=1.0,color='black',label='Galaxy')
-        ax1.plot(lam,best_model_no_outflows[0],linewidth=1.0,color='red',label='NO Outflow Model')
-        ax1.plot(lam,best_model_no_outflows[1][0],linewidth=1.0,color='limegreen',label='Host-galaxy')
-        ax1.plot(lam,best_model_no_outflows[1][1],linewidth=1.0,color='orange',label='Na. FeII')
-        ax1.plot(lam,best_model_no_outflows[1][2],linewidth=1.0,color='darkorange',label='Br. FeII')
-        ax1.plot(lam,best_model_no_outflows[1][3],linewidth=1.0,color='blue',label='Broad')
-        ax1.plot(lam,best_model_no_outflows[1][4],linewidth=1.0,color='dodgerblue',label='Narrow')
-        ax1.plot(lam,best_model_no_outflows[1][5],linewidth=1.0,color='dodgerblue',label='')
-        ax1.plot(lam,best_model_no_outflows[1][6],linewidth=1.0,color='dodgerblue')
-        # Perform robust sigma clipping to get a good noise value
-        resid_no_outflow = (galaxy-best_model_no_outflows[0])
-        # sig_clip_resid_no_outflow = sigma_clip(resid_no_outflow,sigma=3)
-        # no_outflow_std = round(mad_std(sig_clip_resid_no_outflow),2)
-        no_outflow_std = round(mad_std(resid_no_outflow),2)
-        # ax2.plot(lam,sig_clip_resid_no_outflow,linewidth=1.0,color='black',label=r'Residuals, $\sigma=%0.3f$' % no_outflow_std)
-        ax2.plot(lam,resid_no_outflow,linewidth=1.0,color='black',label=r'Residuals, $\sigma=%0.3f$' % no_outflow_std)
-        ax1.set_ylim(0.0,np.max(np.max([galaxy,best_model_no_outflows[0]])+(3*no_outflow_std)))
-        ax2.set_ylim(np.min(resid_no_outflow)-(3*no_outflow_std),np.max(np.max([galaxy,best_model_no_outflows[0]])+(3*no_outflow_std)))
-        ax2.axhline(0.0,color='black',linestyle='--')
-        ax2.axhline(no_outflow_std,color='red',linestyle='--',linewidth=0.5)
-        ax2.axhline(-no_outflow_std,color='red',linestyle='--',linewidth=0.5)
-        ax1.set_xlim(np.min(lam),np.max(lam))
-        ax2.set_xlim(np.min(lam),np.max(lam))
-        ax1.legend(loc='upper right')
-        ax2.legend(loc='upper right')
-        plt.savefig(run_dir+'no_outflow_model.pdf',dpi=300,fmt='pdf')
-
-        return no_outflow_std
-
-def final_no_outflow_model(pars,lam,fwhm_gal,na_feii_template,br_feii_template,temp_fft,npad,velscale,npix,vsyst,galaxy,temp_list,run_dir,move_temp=False,output_model=False):    
-    """
-    Constructs galaxy model by convolving templates with a LOSVD given by 
-    a specified set of velocity parameters. 
-    
-    Parameters:
-        pars: parameters of Markov-chain
-        lam: wavelength vector used for continuum model
-        temp_fft: the Fourier-transformed templates
-        npad: 
-        velscale: the velocity scale in km/s/pixel
-        npix: number of output pixels; must be same as galaxy
-        vsyst: dv; the systematic velocity fr
-    """
-
-    def find_nearest_gal_model(array, value):
-        array = np.asarray(array)
-        idx = (np.abs(array - value)).argmin()
-        return array[idx],idx
-
-    # Free-parameters (14 total):
-    #------------------------------------------
-    # [0] - Stellar velocity
-    # [1] - Stellar velocity dispersion
-    # [2] - AGN simple power-law slope
-    # [3] - AGN simple power-law amplitude
-    # [4] - Narrow FeII amplitude
-    # [5] - Broad FeII amplitude
-    # [6] - Na. [OIII]5007 Core Amplitude
-    # [7] - Na. [OIII]5007 Core FWHM
-    # [8] - Na. [OIII]5007 Core VOFF
-    # [9] - Na. H-beta amplitude
-    #      - Na. H-beta FWHM tied to [OIII]5007
-    # [10] - Na. H-beta VOFF
-    # [11] - Br. H-beta amplitude
-    # [12] - Br. H-beta FWHM
-    # [13] - Br. H-beta VOFF
-    ############################# Power-law Component ######################################################
-    # Create a template model for the power-law continuum
-    cont = simple_power_law(lam,pars[2],pars[3]) # ind 2 = alpha, ind 3 = amplitude
-    host_model = galaxy - cont # Subtract off continuum from galaxy, since we only want template weights to be fit
-    ########################################################################################################
-    
-    ############################# Fe II Component ##########################################################
-    # Create template model for narrow and broad FeII emission 
-    # idx 4 = na_feii_amp, idx 5 = br_feii_amp
-    na_feii_amp  = pars[4]
-    br_feii_amp  = pars[5]
-
-    na_feii_template = na_feii_amp*na_feii_template
-    br_feii_template = br_feii_amp*br_feii_template
-
-    # If including FeII templates, initialize them here
-    # na_feii_template,br_feii_template = initialize_feii(lam,velscale,pars[4],pars[5])
-
-    host_model = host_model - (na_feii_template) - (br_feii_template)
-    ########################################################################################################
-
-    ############################# Emission Lines Component #################################################    
-    # Create a template model for emission lines
-    # Narrow [OIII]5007 Core; (6,7,8)=(voff,fwhm,amp)
-    na_oiii5007_center = 5008.240 # Angstroms
-    na_oiii5007_amp  = pars[6] # flux units
-    na_oiii5007_res = fwhm_gal[find_nearest_gal_model(lam,na_oiii5007_center)[1]]*300000./na_oiii5007_center # instrumental fwhm resolution at this line
-    na_oiii5007_fwhm = np.sqrt(pars[7]**2+(na_oiii5007_res)**2) # km/s
-    na_oiii5007_voff = pars[8]  # km/s
-    na_oiii5007 = gaussian(lam,na_oiii5007_center,na_oiii5007_amp,na_oiii5007_fwhm,na_oiii5007_voff,velscale)
-
-    # Narrow [OIII]4959 Core; (6,7,9)=(voff,fwhm,amp)
-    na_oiii4959_center = 4960.295 # Angstroms
-    na_oiii4959_amp  = (1.0/3.0)*pars[6] # flux units
-    na_oiii4959_fwhm = na_oiii5007_fwhm # km/s
-    na_oiii4959_voff = na_oiii5007_voff  # km/s
-    na_oiii4959 = gaussian(lam,na_oiii4959_center,na_oiii4959_amp,na_oiii4959_fwhm,na_oiii4959_voff,velscale)
-
-    # Narrow H-beta; (13,,14)=(voff,fwhm,amp)
-    na_hb_center = 4862.68 # Angstroms
-    na_hb_res = fwhm_gal[find_nearest_gal_model(lam,na_hb_center)[1]]*300000./na_hb_center # instrumental fwhm resolution at this line
-    na_hb_amp  = pars[9] # flux units
-    na_hb_fwhm = np.sqrt(na_oiii5007_fwhm**2+(na_hb_res)**2) # km/s
-    na_hb_voff = pars[10]  # km/s
-    na_Hb = gaussian(lam,na_hb_center,na_hb_amp,na_hb_fwhm,na_hb_voff,velscale)
-
-    # Broad H-beta; (15,16,17)=(voff,fwhm,amp)
-    na_hb_center = 4862.68 # Angstroms
-    br_hb_amp  = pars[11] # flux units
-    br_hb_res = fwhm_gal[find_nearest_gal_model(lam,na_hb_center)[1]]*300000./na_hb_center # instrumental fwhm resolution at this line
-    br_hb_fwhm = np.sqrt(pars[12]**2+(br_hb_res)**2) # km/s
-    br_hb_voff = pars[13]  # km/s
-    br_Hb = gaussian(lam,na_hb_center,br_hb_amp,br_hb_fwhm,br_hb_voff,velscale)
-
-    host_model = (host_model) - (br_Hb) - (na_Hb) - (na_oiii4959) - (na_oiii5007) 
-
-    ########################################################################################################
-    
-    ############################# Host-galaxy Component ####################################################    
-    # Convolve the templates with a LOSVD
-    losvd_params = [pars[0],pars[1]] # ind 0 = velocity*, ind 1 = sigma*
-    conv_temp = convolve_gauss_hermite(temp_fft,npad,float(velscale),\
-                losvd_params,npix,velscale_ratio=1,sigma_diff=0,vsyst=vsyst)
-    
-    # Fitted weights of all templates using Non-negative Least Squares (NNLS)
-#     host_model = galaxy
-    weights = nnls(conv_temp,host_model)
-
-    if move_temp==True:
-        # Templates that are used are placed in templates folder
-        def path_leaf(path):
-            head, tail = ntpath.split(path)
-            return tail or ntpath.basename(head)
-
-        a =  np.where(weights>0)[0]
-        for i in a:
-            s = temp_list[i]
-            temp_name = path_leaf(temp_list[i])
-            # print s,temp_name,work_dir+'templates/'+temp_name
-            if os.path.exists(run_dir+'templates/'+temp_name)==False:
-                # Check if template file was already copied to template folder
-                # If not, copy it to templates folder for each object
-                print(' Moving template %s' % temp_name)
-                shutil.copyfile(temp_list[i],run_dir+'templates/'+temp_name)
-
-
-    # if 1: sys.exit()
-
-    ########################################################################################################
-    
-    # The final model is sum(stellar templates*weights) + continuum model
-    gmodel = (np.sum(weights*conv_temp,axis=1)) + cont + (na_feii_template) + (br_feii_template) + (br_Hb) + (na_Hb)\
-     + (na_oiii4959) + (na_oiii5007) 
-
-    ########################## Measure Emission Line Fluxes #################################################
-
-    na_feii_flux       = simps(na_feii_template,lam)
-    br_feii_flux       = simps(br_feii_template,lam)
-    br_Hb_flux         = simps(br_Hb,lam)
-    na_Hb_flux         = simps(na_Hb,lam)
-    na_oiii4959_flux   = simps(na_oiii4959,lam)
-    na_oiii5007_flux   = simps(na_oiii5007,lam)
-    # Put em_line_fluxes into dataframe
-    em_line_fluxes = {'na_feii_flux':[na_feii_flux],'br_feii_flux':[br_feii_flux],'br_Hb_flux':[br_Hb_flux],'na_Hb_flux':[na_Hb_flux],\
-    'na_oiii4959_flux':[na_oiii4959_flux],'na_oiii5007_flux':[na_oiii5007_flux]}
-    em_line_cols = ['na_feii_flux','br_feii_flux','br_Hb_flux','na_Hb_flux','na_oiii4959_flux','na_oiii5007_flux']
-    df_fluxes = pd.DataFrame(data=em_line_fluxes,columns=em_line_cols)
-
-    # Write to csv
-    # Create a folder in the working directory to save plots and data to
-    if os.path.exists(run_dir+'em_line_fluxes.csv')==False:
-    #     # If file has not been created, create it 
-        # print(work_dir+'MCMC_output/em_line_fluxes.csv')
-        # print(' File does not exist!')
-        df_fluxes.to_csv(run_dir+'em_line_fluxes.csv',sep=',')
-    if os.path.exists(run_dir+'em_line_fluxes.csv')==True:
-    #     # If file has been created, append df_fluxes to existing file
-        # print( ' File exists!')
-        with open(run_dir+'em_line_fluxes.csv', 'a') as f:
-            df_fluxes.to_csv(f, header=False)
-
-
-    # if 1: sys.exit()
-    ########################################################################################################
-
-    if output_model==False:
-        return gmodel
-    elif output_model==True: # output all models
-        allmodels = [np.sum(weights*conv_temp,axis=1),cont,na_feii_template,br_feii_template,\
-                    br_Hb,na_Hb,na_oiii4959,na_oiii5007]
-        return gmodel,allmodels,weights
-
-##################################################################################
-
-def likelihood(params,lam_gal,temp_fft,npad,velscale,npix,dv,galaxy,sigma):
-    # Create model
-    model = galaxy_model(params,lam_gal,temp_fft,npad,velscale,npix,dv,galaxy)
-    # Calculate log-likelihood
-    l = -0.5*(galaxy-model)**2/(sigma)**2#-0.5*( np.log(2*np.pi*sigma**2)+(galaxy-model)**2/(sigma)**2 )
-    l = np.sum(l,axis=0)
-    return l,model
 
 ##################################################################################
 
@@ -1906,7 +2706,7 @@ def grid(x, y, z, resX=25, resY=25):
     X, Y = meshgrid(xi, yi)
     return X, Y, zi
 
-def conf_int(x,prob,factor): # Function for calculating an arbitrary confidence interval (%)
+def conf_int(x,prob,factor,flat): # Function for calculating an arbitrary confidence interval (%)
     
     def find_nearest(array,value):
         idx = (np.abs(array-value)).argmin()
@@ -1947,64 +2747,60 @@ def conf_int(x,prob,factor): # Function for calculating an arbitrary confidence 
             if round(integral,2) == 0.68: #68.0/100.0:
                 # 1 sigma = 68% confidence interval
                 conf_interval_1 = [pdfmax - np.min(xvec),np.max(xvec) - pdfmax]
-#                 print conf_interval_1
-#             elif round(integral,2) == 0.95: #95.0/100.0:    
-#                 # 2 sigma = 95% confidence interval
-#                 conf_interval_2 = [pdfmax - np.min(xvec),np.max(xvec) - pdfmax]
-#                 print conf_interval_2
-#             elif round(integral,3) == 0.997: #99.7/100.0:    
-#                 # 3 sigma = 99.7% confidence interval
-#                 conf_interval_3 = [pdfmax - np.min(xvec),np.max(xvec) - pdfmax]
-#                 print conf_interval_3
-#                 break
                 
         return pdfmax,conf_interval_1[0],conf_interval_1[1],xvec,yvec*scale_factor
 #                 conf_interval_2[0],conf_interval_2[1],\
 #                 conf_interval_3[0],conf_interval_3[1],
 
     except: 
-        print("\n Error: Cannot determine confidence interval.")
-        mode = x[np.where(prob==np.max(prob))]
-        mean = simps(x*prob,x)
-        std = np.sqrt(simps((x-mean)**2*prob,x))
-        return mode[0],std,std,x,np.zeros(len(prob))
+        print("\n          Error: Cannot determine confidence interval.  Using median and std. dev. from flattened chain...")
+        # mode = x[np.where(prob==np.max(prob))]
+        # mean = simps(x*prob,x)
+        med = np.median(flat)
+        # std = np.sqrt(simps((x-mean)**2*prob,x))
+        std = np.std(flat)
+        return med,std,std,x,np.zeros(len(prob))
 
 def determine_hist_bins(chains):
-        """
-        Determines the maxmimum number of bins for a histogram 
-        that is unimodal.
-        
-        Parameters
-        ----------
-        chain : array_like
-            MCMC chain of a parameter.  Recommended 
-            minimum length of 10000.
-    
-        Returns
-        -------
-        nbins:int
-            The maximum number of bins that still
-            results in a unimodal distribution.
-        """
-        chain_bins = []
-        for c in range(0,len(chains),1):
-            max_bins = 200 # maximum number of bins to consider
-            min_bins = 4 # minimum number of bins to consider
-            for i in range(min_bins,max_bins,1):
-                n,bins = np.histogram(chains[c],i)
-                new_n = np.r_[True, n[1:] > n[:-1]] & np.r_[n[:-1] > n[1:], True]
-                if len(new_n[new_n==True])>1 and i==min_bins:
-                    # Really bad sampling of parameter space, default to 3 bins
-                    nbins = min_bins
-                elif len(new_n[new_n==True])==1 and i>min_bins:
-                    # Increase bin size and check again
-                    continue
-                elif len(new_n[new_n==True])>1 and i>min_bins:
-                    # Max.# of bins for global maximum reached, stop here
-                    nbins = i-1
-                    chain_bins.append(nbins)
-                    break
-        return chain_bins
+		"""
+		Determines the maxmimum number of bins for a histogram 
+		that is unimodal.
+		
+		Parameters
+		----------
+		chain : array_like
+		    MCMC chain of a parameter.  Recommended 
+		    minimum length of 10000.
+		
+		Returns
+		-------
+		nbins:int
+		    The maximum number of bins that still
+		    results in a unimodal distribution.
+		"""
+		chain_bins = []
+		for c in range(0,len(chains),1):
+		    max_bins = 25 # maximum number of bins to consider
+		    min_bins = 4 # minimum number of bins to consider
+		    for i in range(min_bins,max_bins,1):
+		        n,bins = np.histogram(chains[c],i)
+		        new_n = np.r_[True, n[1:] > n[:-1]] & np.r_[n[:-1] > n[1:], True]
+		        if len(new_n[new_n==True])>1 and i==min_bins:
+		            # Really bad sampling of parameter space, default to 3 bins
+		            nbins = min_bins
+		        elif len(new_n[new_n==True])==1 and i>min_bins:
+		            # Increase bin size and check again
+		            continue
+		        elif len(new_n[new_n==True])>1 and i>min_bins:
+		            # Max.# of bins for global maximum reached, stop here
+		            nbins = i-1
+		            chain_bins.append(nbins)
+		            break
+		if (len(chain_bins)==0):
+			return min_bins
+		elif (len(chain_bins)==1):
+			return chain_bins[0]
+
 
 def get_bin_centers(bins):
         bins = bins[:-1]
@@ -2047,383 +2843,344 @@ def remove_outliers(points, thresh=3.5):
 
 
 
-def param_plots(params,param_labels,burnin,sampler_chain,run_dir,model_type):
-    # Store best-fit parameter values from histogram fitting
-    par_best = [] # best fit parameter
-    sig_low  = [] # lower-bound 1-sigma error in best-fit
-    sig_upp  = [] # upper-bound 1-sigma error in best-fit
-    if model_type=='outflow':
-    	# Colors for each parameter
-    	pcolor = ['blue','dodgerblue',\
-    	        'salmon','red',\
-    	        'sandybrown',\
-    	        'darkorange',\
-    	        'green','limegreen','palegreen',\
-    	        'mediumpurple','darkorchid','orchid',\
-    	        'gold','yellow',\
-    	        'steelblue','royalblue','turquoise']
-    	# Savefig name
-    	figname = ['vel','vel_disp',\
-    	        'cont_slope','cont_amp',\
-    	        'na_feii_amp',\
-    	        'br_feii_amp',\
-    	        'oiii5007_core_amp','oiii5007_core_fwhm','oiii5007_core_voff',\
-    	        'oiii5007_outflow_amp','oiii5007_outflow_fwhm','oiii5007_outflow_voff',\
-    	        'na_Hb_amp','na_Hb_voff',\
-    	        'br_Hb_amp','br_Hb_fwhm','br_Hb_voff']
-    elif model_type=='NO_outflow':
-    	# Colors for each parameter
-    	pcolor = ['blue','dodgerblue',\
-    	        'salmon','red',\
-    	        'sandybrown',\
-    	        'darkorange',\
-    	        'green','limegreen','palegreen',\
-    	        'gold','yellow',\
-    	        'steelblue','royalblue','turquoise']
-    	# Savefig name
-    	figname = ['vel','vel_disp',\
-    	        'cont_slope','cont_amp',\
-    	        'na_feii_amp',\
-    	        'br_feii_amp',\
-    	        'oiii5007_core_amp','oiii5007_core_fwhm','oiii5007_core_voff',\
-    	        'na_Hb_amp','na_Hb_voff',\
-    	        'br_Hb_amp','br_Hb_fwhm','br_Hb_voff']
+def param_plots(param_dict,burn_in,run_dir):
+	# Create a histograms sub-folder
+	if (os.path.exists(run_dir + 'param_histograms')==False):
+		os.mkdir(run_dir + 'param_histograms')
 
-    nwalkers = np.shape(sampler_chain)[0]
-    nsteps = np.shape(sampler_chain)[1]
-    ndim = len(params)
-    # Initialize figures and axes
-    # Make an updating plot of the chain
-    fig = plt.figure(figsize=(10,8)) 
-    gs = gridspec.GridSpec(2, 2)
-    gs.update(wspace=0.35, hspace=0.35) # set the spacing between axes. 
-    ax1  = plt.subplot(gs[0,0])
-    ax2  = plt.subplot(gs[0,1])
-    ax3  = plt.subplot(gs[1,0:2])
-    for p in range(0,len(params),1):
-        print p
-        # Clear axes
-        ax1.clear()
-        ax2.clear()
-        ax3.clear()
-        par = p
-        pcol = pcolor[p]
-        flat = sampler_chain[:, burnin:, :].reshape((-1, ndim))
-        flat = flat[:,par]
-        print('OLD FLAT: %s ' % np.shape(flat) )
-        # Remove large outliers here
-        flat = flat[~remove_outliers(flat)] 
-        print('NEW FLAT: %s ' % np.shape(flat) )
-        # print np.mean(flat), np.std(flat)
-        pname = param_labels[par]
-        hbins = determine_hist_bins([flat])
-        # Histogram
-        n, bins, patches = ax1.hist(flat, hbins[0], normed=True, facecolor=pcol, alpha=0.75)
-        pdfmax,low1,upp1,xvec,yvec = conf_int(get_bin_centers(bins),n,100)
-        # pmax.append(pdfmax)
-        # pmin_std.append(low1)
-        # pmax_std.append(upp1)
-        ax1.axvline(pdfmax,linestyle='--',color='black',label='$\mu=%0.6f$' % pdfmax)
-        ax1.axvline(pdfmax-low1,linestyle=':',color='black',label='$\sigma_-=%0.6f$' % low1)
-        ax1.axvline(pdfmax+upp1,linestyle=':',color='black',label='$\sigma_+=%0.6f$' % upp1)
-        ax1.plot(xvec,yvec,color='k')
-        # Output bestfit parameters in axis 2
-        ax2.axvline(pdfmax,linestyle='--',color='white',label='$\mu=%0.6f$' % pdfmax)
-        ax2.axvline(pdfmax-low1,linestyle=':',color='white',label='$\sigma_-=%0.6f$' % low1)
-        ax2.axvline(pdfmax+upp1,linestyle=':',color='white',label='$\sigma_+=%0.6f$' % upp1)
-        # Store values
-        par_best.append(pdfmax)
-        sig_low.append(low1)
-        sig_upp.append(upp1)
-        ax2.legend(loc='upper left',fontsize=14)
-        ax1.set_xlabel(r'%s' % pname,fontsize=12)
-        ax1.set_ylabel(r'$p$(%s)' % pname,fontsize=12)
-        # Parameter chain
-        for i in range(0,nwalkers,1):
-            ax3.plot(range(nsteps),sampler_chain[i,:,par],color='black',linewidth=0.5,alpha=0.5)
-        avg_chain = []
-        for i in range(0,np.shape(sampler_chain)[1],1):
-        #     print i, np.median(sampler.chain[:,i,par])
-            # avg_chain.append(np.mean(sampler.chain[:,i,par]))
-            avg_chain.append(np.mean(sampler_chain[:,i,par]))
-        ax3.plot(range(nsteps),avg_chain,color='red',linewidth=2.0,label='Average')
-        ax3.axvline(burnin,color='dodgerblue',linestyle='--',linewidth=2,label='Burn-in = %d' % burnin)
-        ax3.set_xlim(0,nsteps)
-        ax3.set_xlabel('$N_\mathrm{iter}$',fontsize=12)
-        ax3.set_ylabel(r'%s' % pname,fontsize=12)
-        ax3.legend(loc='upper right')
-        # plt.tight_layout()
-        plt.savefig(run_dir+'%s_MCMC.png' % (figname[p]) ,dpi=300,fmt='png')
-
-    return figname,par_best,sig_low,sig_upp
-
-
-def emline_flux_plots(run_dir,model_type):
-    # Store best-fit parameter values from histogram fitting
-    par_best = [] # best fit parameter
-    sig_low  = [] # lower-bound 1-sigma error in best-fit
-    sig_upp  = [] # upper-bound 1-sigma error in best-fit
-    if model_type=='outflow':
-        # Labels for each parameter 
-        plabels = ['$f_\mathrm{Na\;FeII}$','$f_\mathrm{Br\;FeII}$',\
-                  '$f_{\mathrm{Br\;Hb}}$','$f_{\mathrm{Na\;Hb}}$','$f_{\mathrm{Hb\;Outflow}}$',\
-                  '$f_\mathrm{[OIII]4959\;Core}$','$f_\mathrm{[OIII]4959\;Outflow}$',\
-                  '$f_\mathrm{[OIII]5007\;Core}$','$f_\mathrm{[OIII]5007\;Outflow}$']
-        # Colors for each parameter
-        pcolor = ['sandybrown','darkorange',\
-                  'yellow','steelblue','turquoise',\
-                  'green','limegreen',\
-                  'mediumpurple','darkorchid']
-        # Savefig name
-        figname = ['na_feii_flux','br_feii_flux',\
-                   'br_Hb_flux','na_Hb_flux','br_Hb_outflow_flux',\
-                   'oiii4959_core_flux','oiii4959_outflow_flux',\
-                   'oiii5007_core_flux','oiii5007_outflow_flux']
-    elif model_type=='NO_outflow':
-        # Labels for each parameter 
-        plabels = ['$f_\mathrm{Na\;FeII}$','$f_\mathrm{Br\;FeII}$',\
-                  '$f_{\mathrm{Br\;Hb}}$','$f_{\mathrm{Na\;Hb}}$',\
-                  '$f_\mathrm{[OIII]4959\;Core}$',\
-                  '$f_\mathrm{[OIII]5007\;Core}$']
-        # Colors for each parameter
-        pcolor = ['sandybrown','darkorange',\
-                  'yellow','steelblue',\
-                  'green',\
-                  'mediumpurple']
-        # Savefig name
-        figname = ['na_feii_flux','br_feii_flux',\
-                   'br_Hb_flux','na_Hb_flux',\
-                   'oiii4959_core_flux',\
-                   'oiii5007_core_flux']
-
-    # Open the file containing the line flux data
-    df = pd.read_csv(run_dir+'em_line_fluxes.csv')
-    df = df.drop(df.columns[0], axis=1)
-    nsteps = len(np.array(df[df.columns[0]]))
-    burnin = int(nsteps - nsteps*0.25)       
-    
-    # Initialize figures and axes
-    # Make an updating plot of the chain
-    fig = plt.figure(figsize=(10,8)) 
-    gs = gridspec.GridSpec(2, 2)
-    gs.update(wspace=0.35, hspace=0.35) # set the spacing between axes. 
-    ax1  = plt.subplot(gs[0,0])
-    ax2  = plt.subplot(gs[0,1])
-    ax3  = plt.subplot(gs[1,0:2])
-    for p in range(0,len(df.columns),1):
-        print p
-        # Clear axes
-        ax1.clear()
-        ax2.clear()
-        ax3.clear()
-        par = p
-        pcol = pcolor[p]
-        flat = np.array(df[df.columns[p]])
-
-        pname = plabels[p]
-        hbins = determine_hist_bins([flat[burnin:]])
-        
-        # Histogram
-        n, bins, patches = ax1.hist(flat[burnin:], hbins[0], normed=True, facecolor=pcol, alpha=0.75)
-        pdfmax,low1,upp1,xvec,yvec = conf_int(get_bin_centers(bins),n,100)
-        # pmax.append(pdfmax)
-        # pmin_std.append(low1)
-        # pmax_std.append(upp1)
-        ax1.axvline(pdfmax,linestyle='--',color='black',label='$\mu=%0.6f$' % pdfmax)
-        ax1.axvline(pdfmax-low1,linestyle=':',color='black',label='$\sigma_-=%0.6f$' % low1)
-        ax1.axvline(pdfmax+upp1,linestyle=':',color='black',label='$\sigma_+=%0.6f$' % upp1)
-        ax1.plot(xvec,yvec,color='k')
-        # Output bestfit parameters in axis 2
-        ax2.axvline(pdfmax,linestyle='--',color='white',label='$\mu=%0.6f$' % pdfmax)
-        ax2.axvline(pdfmax-low1,linestyle=':',color='white',label='$\sigma_-=%0.6f$' % low1)
-        ax2.axvline(pdfmax+upp1,linestyle=':',color='white',label='$\sigma_+=%0.6f$' % upp1)
-        # Store values
-        par_best.append(pdfmax)
-        sig_low.append(low1)
-        sig_upp.append(upp1)
-        ax2.legend(loc='upper left',fontsize=14)
-        ax1.set_xlabel(r'%s' % pname,fontsize=12)
-        ax1.set_ylabel(r'$p$(%s)' % pname,fontsize=12)
-        # Parameter chain
-        ax3.plot(range(nsteps),flat,color='black',linewidth=0.5,alpha=0.5)
-        ax3.axhline(pdfmax,color='red',linewidth=2.0,label='Average')
-        ax3.axvline(burnin,color='dodgerblue',linestyle='--',linewidth=2,label='Burn-in = %d' % burnin)
-        ax3.set_xlim(0,nsteps)
-        ax3.set_xlabel('$N_\mathrm{iter}$',fontsize=12)
-        ax3.set_ylabel(r'%s' % pname,fontsize=12)
-        ax3.legend(loc='upper right')
-        # plt.tight_layout()
-        plt.savefig(run_dir+'%s_MCMC.png' % (figname[p]) ,dpi=300,fmt='png')
-
-    return figname,par_best,sig_low,sig_upp
-
-def flux2lum(eline_flux_figname,eline_flux_best,eline_flux_sig_low,eline_flux_sig_upp,z,run_dir,H0=71.0,Om0=0.27):
-    # Rename fignames _flux to _lum
-    figname = []
-    for name in eline_flux_figname:
-        figname.append(name[:-4]+'lum')
-    print figname
-    # The SDSS spectra are normalized by 10^(-17), so now multiply each flux by 10^(-17)
-    eline_flux_best    = np.array(eline_flux_best) * 1.0E-17
-    eline_flux_sig_low = np.array(eline_flux_sig_low) * 1.0E-17
-    eline_flux_sig_upp = np.array(eline_flux_sig_upp) * 1.0E-17
-    # Compute luminosity distance (in cm) using FlatLambdaCDM cosmology
-    cosmo = FlatLambdaCDM(H0, Om0)
-    d_mpc = cosmo.luminosity_distance(z) 
-    d_cm = d_mpc * 3.086E+24 # 1 Mpc = 3.086e+24 cm
-    # Convert fluxes to luminosities and normalize by 10^(+42) to avoid numerical issues 
-    eline_lum_best    = (eline_flux_best * 4*np.pi * d_cm**2    )/1.0E+42
-    eline_lum_sig_low = (eline_flux_sig_low * 4*np.pi * d_cm**2 )/1.0E+42
-    eline_lum_sig_upp = (eline_flux_sig_upp * 4*np.pi* d_cm**2)/1.0E+42
-    
-    return figname,eline_lum_best,eline_lum_sig_low,eline_lum_sig_upp
-
-def write_fits_table(figname,par_best,sig_low,sig_upp,run_dir,model_type):
-    # Write best-fit paramters to FITS table
-    col1 = fits.Column(name='parameter', format='20A', array=figname)
-    col2 = fits.Column(name='best_fit', format='E', array=par_best)
-    col3 = fits.Column(name='sigma_low', format='E', array=sig_low)
-    col4 = fits.Column(name='sigma_upp', format='E', array=sig_upp)
-    cols = fits.ColDefs([col1,col2,col3,col4])
-    hdu = fits.BinTableHDU.from_columns(cols)
-    hdu.writeto(run_dir+'par_table.fits',overwrite=True)
-
-def write_MCMC_data(sampler_chain,run_dir,model_type):
-	nwalkers = np.shape(sampler_chain)[0]
-	nsteps = np.shape(sampler_chain)[1]
-	ndim = np.shape(sampler_chain)[2]
-	# Write MCMC data to csv
-	flat = sampler_chain[:, :, :].reshape((-1, ndim))
-    
-	if model_type=='outflow':
-		d = {'vel':flat[:,0],'vel_disp':flat[:,1],\
-		     'cont_slope':flat[:,2],'cont_amp':flat[:,3],\
-		     'na_feii_amp':flat[:,4],\
-		     'br_feii_amp':flat[:,5],\
-		     'oiii5007_core_amp':flat[:,6],'oiii5007_core_fwhm':flat[:,7],'oiii5007_core_voff':flat[:,8],\
-		     'oiii5007_outflow_amp':flat[:,9],'oiii5007_outflow_fwhm':flat[:,10],'oiii5007_outflow_voff':flat[:,11],\
-		     'na_Hb_amp':flat[:,12],'na_Hb_voff':flat[:,13],\
-		     'br_Hb_amp':flat[:,14],'br_Hb_fwhm':flat[:,15],'br_Hb_voff':flat[:,16]}
-		
-		df = pd.DataFrame(data=d,columns=['vel','vel_disp',\
-			  'cont_slope','cont_amp',\
-			  'na_feii_amp',\
-			  'br_feii_amp',\
-			  'oiii5007_core_amp','oiii5007_core_fwhm','oiii5007_core_voff',\
-			  'oiii5007_outflow_amp','oiii5007_outflow_fwhm','oiii5007_outflow_voff',\
-			  'na_Hb_amp','na_Hb_voff',\
-			  'br_Hb_amp','br_Hb_fwhm','br_Hb_voff'])
-	elif model_type=='NO_outflow':
-		d = {'vel':flat[:,0],'vel_disp':flat[:,1],\
-		     'cont_slope':flat[:,2],'cont_amp':flat[:,3],\
-		     'na_feii_amp':flat[:,4],\
-		     'br_feii_amp':flat[:,5],\
-		     'oiii5007_core_amp':flat[:,6],'oiii5007_core_fwhm':flat[:,7],'oiii5007_core_voff':flat[:,8],\
-		     'na_Hb_amp':flat[:,9],'na_Hb_voff':flat[:,10],\
-		     'br_Hb_amp':flat[:,11],'br_Hb_fwhm':flat[:,12],'br_Hb_voff':flat[:,13]}
-		
-		df = pd.DataFrame(data=d,columns=['vel','vel_disp',\
-		    'cont_slope','cont_amp',\
-		    'na_feii_amp',\
-		    'br_feii_amp',\
-		    'oiii5007_core_amp','oiii5007_core_fwhm','oiii5007_core_voff',\
-		    'na_Hb_amp','na_Hb_voff',\
-		    'br_Hb_amp','br_Hb_fwhm','br_Hb_voff'])
-
-	df.to_csv(run_dir+'MCMC_data.csv',sep=',')
-    
-def plot_best_model(lam_gal,galaxy,best_model,run_dir,model_type):
-    # Initialize figures and axes
+	# Initialize figures and axes
 	# Make an updating plot of the chain
-    fig = plt.figure(figsize=(10,6)) 
-    gs = gridspec.GridSpec(4, 1)
-    gs.update(wspace=0.0, hspace=0.0) # set the spacing between axes. 
-    ax1  = plt.subplot(gs[0:3,0])
-    ax2  = plt.subplot(gs[3,0])
+	fig = plt.figure(figsize=(10,8)) 
+	gs = gridspec.GridSpec(2, 2)
+	gs.update(wspace=0.35, hspace=0.35) # set the spacing between axes. 
+	ax1  = plt.subplot(gs[0,0])
+	ax2  = plt.subplot(gs[0,1])
+	ax3  = plt.subplot(gs[1,0:2])
+	for key in param_dict:
+		print('          %s' % key)
+		# Clear axes
+		ax1.clear()
+		ax2.clear()
+		ax3.clear()
+		flat = param_dict[key]['chain']
+		# Burn-in
+		burn_ind = int(len(flat)*burn_in)
+		flat = flat[-burn_ind:]
+		# Remove large outliers here
+		flat_test = np.copy(flat)[~remove_outliers(flat)] 
+		if (len(flat_test) > 0): 
+			flat = flat_test
+
+		pname = param_dict[key]['label']
+		pcol  = param_dict[key]['pcolor']
+		# hbins = determine_hist_bins([flat])
+		hbins = 25
+
+		# Histogram
+		n, bins, patches = ax1.hist(flat, hbins, density=True, facecolor=pcol, alpha=0.75)
+
+		pdfmax,low1,upp1,xvec,yvec = conf_int(get_bin_centers(bins),n,10,flat)
+		# Store values in dictionary
+		param_dict[key]['par_best'] = pdfmax
+		param_dict[key]['sig_low']  = low1
+		param_dict[key]['sig_upp']  = upp1
+
+		ax1.axvline(pdfmax,linestyle='--',color='white',label='$\mu=%0.6f$\n' % pdfmax)
+		ax1.axvline(pdfmax-low1,linestyle=':',color='white',label='$\sigma_-=%0.6f$\n' % low1)
+		ax1.axvline(pdfmax+upp1,linestyle=':',color='white',label='$\sigma_+=%0.6f$\n' % upp1)
+		ax1.plot(xvec,yvec,color='white')
+		# Output bestfit parameters in axis 2
+		ax2.axvline(pdfmax,linestyle='--',color='black',label='$\mu=%0.6f$' % pdfmax)
+		ax2.axvline(pdfmax-low1,linestyle=':',color='black',label='$\sigma_-=%0.6f$' % low1)
+		ax2.axvline(pdfmax+upp1,linestyle=':',color='black',label='$\sigma_+=%0.6f$' % upp1)
+		
+		ax2.legend(loc='upper left',fontsize=14)
+		ax1.set_xlabel(r'%s' % pname,fontsize=12)
+		ax1.set_ylabel(r'$p$(%s)' % pname,fontsize=12)
+		# Parameter chain
+		ax3.plot(range(len(param_dict[key]['chain'])),param_dict[key]['chain'],color='white',linewidth=0.5,alpha=0.5)
+		avg_chain = np.median(param_dict[key]['chain'])
+		ax3.axhline(avg_chain,color='red',linewidth=2.0,label='Median')
+		ax3.axvline(len(param_dict[key]['chain'])-len(param_dict[key]['chain'])*burn_in,color='dodgerblue',linestyle='--',linewidth=2,label='Burn-in = %d' % (len(param_dict[key]['chain'])-len(param_dict[key]['chain'])*burn_in))
+		ax3.set_xlim(0,len(param_dict[key]['chain']))
+		ax3.set_xlabel('$N_\mathrm{iter}$',fontsize=12)
+		ax3.set_ylabel(r'%s' % pname,fontsize=12)
+		ax3.legend(loc='upper right')
+		# plt.tight_layout()
+		figname = param_dict[key]['name']
+		plt.savefig(run_dir+'param_histograms/'+'%s_MCMC.png' % (figname) ,dpi=300,fmt='png')
+
+	return param_dict
+
+
+def emline_flux_plots(burn_in,run_dir):
+	# Create a histograms sub-folder
+	if (os.path.exists(run_dir + 'param_histograms')==False):
+		os.mkdir(run_dir + 'param_histograms')
+
+	# Open the file containing the line flux data
+	df = pd.read_csv(run_dir+'em_line_fluxes.csv')
+	keys = list(df.columns.values)[1:]
+	df = df.drop(df.columns[0], axis=1)     
+	# Create a flux dictionary
+	flux_dict = {}
+	for i in range(0,len(df.columns),1):
+		flux_dict[keys[i]]= {'chain':np.array(df[df.columns[i]])}
+
+	# Initialize figures and axes
+	# Make an updating plot of the chain
+	fig = plt.figure(figsize=(10,8)) 
+	gs = gridspec.GridSpec(2, 2)
+	gs.update(wspace=0.35, hspace=0.35) # set the spacing between axes. 
+	ax1  = plt.subplot(gs[0,0])
+	ax2  = plt.subplot(gs[0,1])
+	ax3  = plt.subplot(gs[1,0:2])
+	for key in flux_dict:
+		print('          %s' % key)
+		# Clear axes
+		ax1.clear()
+		ax2.clear()
+		ax3.clear()
+		flat = flux_dict[key]['chain']
+		# Burn-in
+		burn_ind = int(len(flat)*burn_in)
+		flat = flat[-burn_ind:]
+		# Remove large outliers here
+		flat_test = np.copy(flat)[~remove_outliers(flat)] 
+		if (len(flat_test) > 0): 
+			flat = flat_test
+
+		pname = key
+		# hbins = determine_hist_bins(flat)
+		hbins = 25
+		# Histogram
+		n, bins, patches = ax1.hist(flat, hbins, density=True, alpha=0.75)
+
+		pdfmax,low1,upp1,xvec,yvec = conf_int(get_bin_centers(bins),n,10,flat)
+		# Store values in dictionary
+		flux_dict[key]['par_best'] = pdfmax
+		flux_dict[key]['sig_low']  = low1
+		flux_dict[key]['sig_upp']  = upp1
+
+		ax1.axvline(pdfmax,linestyle='--',color='white',label='$\mu=%0.6f$\n' % pdfmax)
+		ax1.axvline(pdfmax-low1,linestyle=':',color='white',label='$\sigma_-=%0.6f$\n' % low1)
+		ax1.axvline(pdfmax+upp1,linestyle=':',color='white',label='$\sigma_+=%0.6f$\n' % upp1)
+		ax1.plot(xvec,yvec,color='white')
+		# Output bestfit parameters in axis 2
+		ax2.axvline(pdfmax,linestyle='--',color='black',label='$\mu=%0.6f$' % pdfmax)
+		ax2.axvline(pdfmax-low1,linestyle=':',color='black',label='$\sigma_-=%0.6f$' % low1)
+		ax2.axvline(pdfmax+upp1,linestyle=':',color='black',label='$\sigma_+=%0.6f$' % upp1)
+		
+		ax2.legend(loc='upper left',fontsize=14)
+		ax1.set_xlabel(r'%s' % pname,fontsize=12)
+		ax1.set_ylabel(r'$p$(%s)' % pname,fontsize=12)
+		# Parameter chain
+		ax3.plot(range(len(flux_dict[key]['chain'])),flux_dict[key]['chain'],color='white',linewidth=0.5,alpha=0.5)
+		avg_chain = np.median(flux_dict[key]['chain'])
+		ax3.axhline(avg_chain,color='red',linewidth=2.0,label='Median')
+		ax3.axvline(len(flux_dict[key]['chain'])-len(flux_dict[key]['chain'])*burn_in,color='dodgerblue',linestyle='--',linewidth=2,label='Burn-in = %d' % (len(flux_dict[key]['chain'])-len(flux_dict[key]['chain'])*burn_in))
+		ax3.set_xlim(0,len(flux_dict[key]['chain']))
+		ax3.set_xlabel('$N_\mathrm{iter}$',fontsize=12)
+		ax3.set_ylabel(r'%s' % pname,fontsize=12)
+		ax3.legend(loc='upper right')
+		# plt.tight_layout()
+		figname = key
+
+		plt.savefig(run_dir+'param_histograms/'+'%s_MCMC.png' % (figname) ,dpi=300,fmt='png')
+
+	return flux_dict
+
+def flux2lum(flux_dict,burn_in,z,run_dir,H0=71.0,Om0=0.27):
+	# Create a histograms sub-folder
+	if (os.path.exists(run_dir + 'param_histograms')==False):
+		os.mkdir(run_dir + 'param_histograms')
+
+	# Extract flux dict and keys
+	# lum_keys = []
+	# for key in flux_dict:
+	# 	keys.append(key[:-4]+'lum')
+   
+	# Create a flux dictionary
+	lum_dict = {}
+	for key in flux_dict:
+		flux = (flux_dict[key]['chain']) * 1.0E-17
+		# Compute luminosity distance (in cm) using FlatLambdaCDM cosmology
+		cosmo = FlatLambdaCDM(H0, Om0)
+		d_mpc = cosmo.luminosity_distance(z).value
+		d_cm  = d_mpc * 3.086E+24 # 1 Mpc = 3.086e+24 cm
+		# Convert fluxes to luminosities and normalize by 10^(+42) to avoid numerical issues 
+		lum   = (flux * 4*np.pi * d_cm**2    ) / 1.0E+42
+
+		lum_dict[key[:-4]+'lum']= {'chain':lum}
+
+	# Initialize figures and axes
+	# Make an updating plot of the chain
+	fig = plt.figure(figsize=(10,8)) 
+	gs = gridspec.GridSpec(2, 2)
+	gs.update(wspace=0.35, hspace=0.35) # set the spacing between axes. 
+	ax1  = plt.subplot(gs[0,0])
+	ax2  = plt.subplot(gs[0,1])
+	ax3  = plt.subplot(gs[1,0:2])
+	for key in lum_dict:
+		print('          %s' % key)
+		# Clear axes
+		ax1.clear()
+		ax2.clear()
+		ax3.clear()
+		flat = lum_dict[key]['chain']
+		# Burn-in
+		burn_ind = int(len(flat)*burn_in)
+		flat = flat[-burn_ind:]
+		# Remove large outliers here
+		flat_test = np.copy(flat)[~remove_outliers(flat)] 
+		if (len(flat_test) > 0): 
+			flat = flat_test
+
+		pname = key
+		# hbins = determine_hist_bins(flat)
+		hbins = 25
+
+		# Histogram
+		n, bins, patches = ax1.hist(flat, hbins, density=True, alpha=0.75)
+		pdfmax,low1,upp1,xvec,yvec = conf_int(get_bin_centers(bins),n,10,flat)
+		# Store values in dictionary
+		lum_dict[key]['par_best'] = pdfmax
+		lum_dict[key]['sig_low']  = low1
+		lum_dict[key]['sig_upp']  = upp1
+
+		ax1.axvline(pdfmax,linestyle='--',color='white',label='$\mu=%0.6f$\n' % pdfmax)
+		ax1.axvline(pdfmax-low1,linestyle=':',color='white',label='$\sigma_-=%0.6f$\n' % low1)
+		ax1.axvline(pdfmax+upp1,linestyle=':',color='white',label='$\sigma_+=%0.6f$\n' % upp1)
+		ax1.plot(xvec,yvec,color='white')
+		# Output bestfit parameters in axis 2
+		ax2.axvline(pdfmax,linestyle='--',color='black',label='$\mu=%0.6f$' % pdfmax)
+		ax2.axvline(pdfmax-low1,linestyle=':',color='black',label='$\sigma_-=%0.6f$' % low1)
+		ax2.axvline(pdfmax+upp1,linestyle=':',color='black',label='$\sigma_+=%0.6f$' % upp1)
+		
+		ax2.legend(loc='upper left',fontsize=14)
+		ax1.set_xlabel(r'%s' % pname,fontsize=12)
+		ax1.set_ylabel(r'$p$(%s)' % pname,fontsize=12)
+		# Parameter chain
+		ax3.plot(range(len(lum_dict[key]['chain'])),lum_dict[key]['chain'],color='white',linewidth=0.5,alpha=0.5)
+		avg_chain = np.median(lum_dict[key]['chain'])
+		ax3.axhline(avg_chain,color='red',linewidth=2.0,label='Median')
+		ax3.axvline(len(lum_dict[key]['chain'])-len(lum_dict[key]['chain'])*burn_in,color='dodgerblue',linestyle='--',linewidth=2,label='Burn-in = %d' % (len(lum_dict[key]['chain'])-len(lum_dict[key]['chain'])*burn_in))
+		ax3.set_xlim(0,len(lum_dict[key]['chain']))
+		ax3.set_xlabel('$N_\mathrm{iter}$',fontsize=12)
+		ax3.set_ylabel(r'%s' % pname,fontsize=12)
+		ax3.legend(loc='upper right')
+		# plt.tight_layout()
+		figname = key
+
+		plt.savefig(run_dir+'param_histograms/'+'%s_MCMC.png' % (figname) ,dpi=300,fmt='png')
+
+	return lum_dict
+		
+
+def write_param(param_dict,flux_dict,lum_dict,run_dir):
+	# Extract elements from dictionaries
+	par_names = []
+	par_best  = []
+	sig_low   = []
+	sig_upp   = []
+	for key in param_dict:
+	    par_names.append(key)
+	    par_best.append(param_dict[key]['par_best'])
+	    sig_low.append(param_dict[key]['sig_low'])
+	    sig_upp.append(param_dict[key]['sig_upp'])
+	for key in flux_dict:
+	    par_names.append(key)
+	    par_best.append(flux_dict[key]['par_best'])
+	    sig_low.append(flux_dict[key]['sig_low'])
+	    sig_upp.append(flux_dict[key]['sig_upp'])    
+	for key in lum_dict:
+	    par_names.append(key)
+	    par_best.append(lum_dict[key]['par_best'])
+	    sig_low.append(lum_dict[key]['sig_low'])
+	    sig_upp.append(lum_dict[key]['sig_upp']) 
+	# Print pars 
+	if 0: 
+	    for i in range(0,len(par_names),1):
+	        print par_names[i],par_best[i],sig_low[i],sig_upp[i]
+	# Write best-fit paramters to FITS table
+	col1 = fits.Column(name='parameter', format='20A', array=par_names)
+	col2 = fits.Column(name='best_fit', format='E', array=par_best)
+	col3 = fits.Column(name='sigma_low', format='E', array=sig_low)
+	col4 = fits.Column(name='sigma_upp', format='E', array=sig_upp)
+	cols = fits.ColDefs([col1,col2,col3,col4])
+	hdu = fits.BinTableHDU.from_columns(cols)
+	hdu.writeto(run_dir+'par_table.fits',overwrite=True)
+
+def write_chain(param_dict,flux_dict,lum_dict,run_dir):
+
+	cols = []
+	# Construct a column for each parameter and chain
+	for key in param_dict:
+		cols.append(fits.Column(name=key, format='E', array=param_dict[key]['chain']))
+	for key in flux_dict:
+		cols.append(fits.Column(name=key, format='E', array=flux_dict[key]['chain']))
+	for key in lum_dict:
+		cols.append(fits.Column(name=key, format='E', array=lum_dict[key]['chain']))
+	# Write to fits
+	cols = fits.ColDefs(cols)
+	hdu = fits.BinTableHDU.from_columns(cols)
+	hdu.writeto(run_dir+'MCMC_chains.fits',overwrite=True)
     
-    if model_type=='outflow':
-    	# Galaxy + Best-fit Model
-    	ax1.plot(lam_gal,galaxy,linewidth=1.0,color='black',label='Data')
-    	ax1.plot(lam_gal,best_model[0],linewidth=1.0,color='red',label='Model')
-    	ax1.plot(lam_gal,best_model[1][0],linewidth=1.0,color='limegreen',label='Host')
-    	ax1.plot(lam_gal,best_model[1][1],linewidth=1.0,color='violet',label='AGN Cont.')
-    	ax1.plot(lam_gal,best_model[1][2],linewidth=1.0,color='orange',label='Na. FeII')
-    	ax1.plot(lam_gal,best_model[1][3],linewidth=1.0,color='darkorange',label='Br. FeII')
-    	ax1.plot(lam_gal,best_model[1][4],linewidth=1.0,color='blue',label='Broad')
-    	ax1.plot(lam_gal,best_model[1][5],linewidth=1.0,color='dodgerblue',label='Narrow')
-    	ax1.plot(lam_gal,best_model[1][6],linewidth=1.0,color='dodgerblue',label='')
-    	ax1.plot(lam_gal,best_model[1][7],linewidth=1.0,color='dodgerblue')
-    	ax1.plot(lam_gal,best_model[1][8],linewidth=1.0,color='orangered',label='Outflow')
-    	ax1.plot(lam_gal,best_model[1][9],linewidth=1.0,color='orangered')
-    	ax1.plot(lam_gal,best_model[1][10],linewidth=1.0,color='orangered')
-    elif model_type=='NO_outflow':
-    	# Galaxy + Best-fit Model
-    	ax1.plot(lam_gal,galaxy,linewidth=1.0,color='black',label='Data')
-    	ax1.plot(lam_gal,best_model[0],linewidth=1.0,color='red',label='Model')
-    	ax1.plot(lam_gal,best_model[1][0],linewidth=1.0,color='limegreen',label='Host')
-    	ax1.plot(lam_gal,best_model[1][1],linewidth=1.0,color='violet',label='AGN Cont.')
-    	ax1.plot(lam_gal,best_model[1][2],linewidth=1.0,color='orange',label='Na. FeII')
-    	ax1.plot(lam_gal,best_model[1][3],linewidth=1.0,color='darkorange',label='Br. FeII')
-    	ax1.plot(lam_gal,best_model[1][4],linewidth=1.0,color='blue',label='Broad')
-    	ax1.plot(lam_gal,best_model[1][5],linewidth=1.0,color='dodgerblue',label='Narrow')
-    	ax1.plot(lam_gal,best_model[1][6],linewidth=1.0,color='dodgerblue',label='')
-    	ax1.plot(lam_gal,best_model[1][7],linewidth=1.0,color='dodgerblue')
+def plot_best_model(param_dict,lam_gal,galaxy,noise,gal_temp,na_feii_temp,br_feii_temp,
+                           temp_list,temp_fft,npad,velscale,npix,vsyst,run_dir):
 
-    ax1.set_xticklabels([])
-    ax1.set_xlim(np.min(lam_gal)-10,np.max(lam_gal)+10)
-    ax1.set_ylim(-0.5*np.median(best_model[0]),np.max([np.max(galaxy),np.max(best_model[0])]))
-    ax1.set_ylabel(r'$f_\lambda$ ($10^{-17}$ erg cm$^{-2}$ s$^{-1}$ $\mathrm{\AA}^{-1}$)',fontsize=12)
-    ax1.legend(loc='best',fontsize=8)
-    # Residuals
-    sigma_resid = np.std(galaxy-best_model[0])
-    ax2.plot(lam_gal,(galaxy-best_model[0])*3,linewidth=1.0,color='red',label='$\sigma=%0.4f$' % (sigma_resid))
-    ax2.axhline(0.0,linewidth=1.0,color='black',linestyle='--')
-    ax2.set_xlim(np.min(lam_gal)-10,np.max(lam_gal)+10)
-    ax2.set_ylim(ax1.get_ylim())
-    ax2.set_ylabel(r'$\Delta f_\lambda$',fontsize=12)
-    ax2.set_xlabel(r'Wavelength, $\lambda\;(\mathrm{\AA})$',fontsize=12)
-    ax2.set_yticks([0.0])
-    ax2.legend(loc='best',fontsize=8)
-    plt.savefig(run_dir+'bestfit_model.png',dpi=300,fmt='png')
+	param_names  = [param_dict[key]['name'] for key in param_dict ]
+	par_best       = [param_dict[key]['par_best'] for key in param_dict ]
 
-    # Write out full models to FITS files 
-    if model_type=='outflow':
-        #cont,na_feii_template,br_feii_template,\
-        # br_Hb,na_Hb,na_oiii4959,na_oiii5007,br_oiii4959,br_oiii5007,br_Hb_outflow
-        hdu1  = fits.PrimaryHDU(galaxy) # original spectrum 
-        hdu2  = fits.ImageHDU(lam_gal) # rest wavelength
-        hdu3  = fits.ImageHDU(best_model[0]) # best-fit model'
 
-        hdu4  = fits.ImageHDU(best_model[1][0]) # stellar-continuum
-        hdu5  = fits.ImageHDU(best_model[1][1]) # agn continuum
-        hdu6  = fits.ImageHDU(best_model[1][2]) # na. FeII emission
-        hdu7  = fits.ImageHDU(best_model[1][3]) # br. FeII emission
-        hdu8  = fits.ImageHDU(best_model[1][4]) # Br. Hb
-        hdu9  = fits.ImageHDU(best_model[1][5]) # Na. Hb Core
-        hdu10 = fits.ImageHDU(best_model[1][6]) # Na. [OIII]4959 Core
-        hdu11 = fits.ImageHDU(best_model[1][7]) # Na. [OIII]5007 Core
-        hdu12 = fits.ImageHDU(best_model[1][8]) # Br. [OIII]4960 Outflow
-        hdu13 = fits.ImageHDU(best_model[1][9]) # Br. [OIII]5007 Outflow
-        hdu14 = fits.ImageHDU(best_model[1][10]) # Br. Hb Outflow
+	output_model = True
+	fit_type     = 'final'
+	move_temp    = False
+	comp_dict = fit_model(par_best,param_names,lam_gal,galaxy,noise,gal_temp,na_feii_temp,br_feii_temp,
+			  temp_list,temp_fft,npad,velscale,npix,vsyst,run_dir,
+			  fit_type,move_temp,output_model)
 
-        hdulist= fits.HDUList([hdu1,hdu2,hdu3,hdu4,hdu5,hdu6,hdu7,hdu8,hdu9,hdu10,hdu11,hdu12,hdu13,hdu14])
-        hdulist.writeto(run_dir+'best_fit_models.fits',overwrite=True)
-        hdulist.close()
-    elif model_type=='NO_outflow':
-        hdu1  = fits.PrimaryHDU(galaxy) # original spectrum 
-        hdu2  = fits.ImageHDU(lam_gal) # rest wavelength
-        hdu3  = fits.ImageHDU(best_model[0]) # best-fit model
-        hdu4  = fits.ImageHDU(best_model[1][0]) # stellar-continuum
-        hdu5  = fits.ImageHDU(best_model[1][1]) # agn continuum
-        hdu6  = fits.ImageHDU(best_model[1][2]) # na. FeII emission
-        hdu7  = fits.ImageHDU(best_model[1][3]) # br. FeII emission
-        hdu8  = fits.ImageHDU(best_model[1][4]) # Br. Hb
-        hdu9  = fits.ImageHDU(best_model[1][5]) # Na. Hb Core
-        hdu10 = fits.ImageHDU(best_model[1][6]) # Na. [OIII]4959 Core
-        hdu11 = fits.ImageHDU(best_model[1][7]) # Na. [OIII]5007 Core
+	# Initialize figures and axes
+	# Make an updating plot of the chain
+	fig = plt.figure(figsize=(10,6)) 
+	gs = gridspec.GridSpec(4, 1)
+	gs.update(wspace=0.0, hspace=0.0) # set the spacing between axes. 
+	ax1  = plt.subplot(gs[0:3,0])
+	ax2  = plt.subplot(gs[3,0])
+    
+	for key in comp_dict:
+		# Galaxy + Best-fit Model
+		if (key != 'residuals') or (key != 'noise') or (key == 'wave'):
+			ax1.plot(lam_gal,comp_dict[key]['comp'],linewidth=comp_dict[key]['linewidth'],color=comp_dict[key]['pcolor'],label=key)
 
-        hdulist= fits.HDUList([hdu1,hdu2,hdu3,hdu4,hdu5,hdu6,hdu7,hdu8,hdu9,hdu10,hdu11])
-        hdulist.writeto(run_dir+'best_fit_models.fits',overwrite=True)
-        hdulist.close()
+	ax1.set_xticklabels([])
+	ax1.set_xlim(np.min(lam_gal)-10,np.max(lam_gal)+10)
+	ax1.set_ylim(-0.5*np.median(comp_dict['model']['comp']),np.max([comp_dict['data']['comp'],comp_dict['model']['comp']]))
+	ax1.set_ylabel(r'$f_\lambda$ ($10^{-17}$ erg cm$^{-2}$ s$^{-1}$ $\mathrm{\AA}^{-1}$)',fontsize=12)
+	# ax1.legend(loc='best',fontsize=8)
+	# Residuals
+	sigma_resid = np.std(comp_dict['data']['comp']-comp_dict['model']['comp'])
+	sigma_noise = np.median(comp_dict['noise']['comp'])
+	ax2.plot(lam_gal,(comp_dict['noise']['comp'])*3,linewidth=comp_dict['noise']['linewidth'],color=comp_dict['noise']['pcolor'],label='$\sigma_{\mathrm{resid}}=%0.4f$' % (sigma_resid))
+	ax2.plot(lam_gal,(comp_dict['residuals']['comp'])*3,linewidth=comp_dict['residuals']['linewidth'],color=comp_dict['residuals']['pcolor'],label='$\sigma_{\mathrm{noise}}=%0.4f$' % (sigma_noise))
+	ax2.axhline(0.0,linewidth=1.0,color='black',linestyle='--')
+	ax2.set_xlim(np.min(lam_gal)-10,np.max(lam_gal)+10)
+	ax2.set_ylim(ax1.get_ylim())
+	ax2.set_ylabel(r'$\Delta f_\lambda$',fontsize=12)
+	ax2.set_xlabel(r'Wavelength, $\lambda\;(\mathrm{\AA})$',fontsize=12)
+	ax2.set_yticks([0.0])
+	ax2.legend(loc='best',fontsize=8)
+	plt.savefig(run_dir+'bestfit_model.pdf',dpi=150,fmt='png')
 
+	cols = []
+	# Construct a column for each parameter and chain
+	for key in comp_dict:
+		cols.append(fits.Column(name=key, format='E', array=comp_dict[key]['comp']))
+	# Write to fits
+
+	cols = fits.ColDefs(cols)
+	hdu = fits.BinTableHDU.from_columns(cols)
+	hdu.writeto(run_dir+'best_model_components.fits',overwrite=True)
+
+	return None
 
