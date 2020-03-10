@@ -1,6 +1,6 @@
 #####################################################
 
-# Bayesian AGN Decomposition Analysis for SDSS Spectra (BADASS,version 6.0)
+# Bayesian AGN Decomposition Analysis for SDSS Spectra (BADASS,version 6.0.1)
 # by Remington Oliver Sexton
 # contact (email): rsext001@ucr.edu
 # Disclaimer: still in development; use at own risk.
@@ -57,7 +57,6 @@ def run_BADASS(file,run_dir,temp_dir,
 	# This is the main function responsible for executing the fitting steps in order
 	# by calling all functions below.
 
-
 	# Determine fitting region
 	fit_reg,good_frac = determine_fit_reg(file,good_thresh,run_dir,fit_reg)
 	if (fit_reg is None):
@@ -97,9 +96,6 @@ def run_BADASS(file,run_dir,temp_dir,
 	                             fit_power=fit_power,fit_broad=fit_broad,
 	                             fit_narrow=fit_narrow,fit_outflows=fit_outflows,
 	                             tie_narrow=tie_narrow)
-
-	
-
 
 	# By generating the galaxy and FeII templates before, instead of generating them with each iteration, we save a lot of time
 	gal_temp = galaxy_template(lam_gal,age=5.0) # 'age=None' option selections a NLS1 template
@@ -443,7 +439,6 @@ def hbeta_to_agn_lum(L,L_low,L_upp,n_samp=1000):
 	# Make distribution and get best-fit MBH and uncertainties
 	n, bins = np.histogram(L5100_,bins='doane', density=True)#, facecolor='xkcd:cerulean blue', alpha=0.75)
 	pdfmax,low1,upp1,xvec,yvec = conf_int(get_bin_centers(bins),n,100,L5100_)
-	# print np.log10(pdfmax),0.434*(low1/pdfmax),0.434*(upp1/pdfmax)
 	#
 	return np.log10(pdfmax),0.434*(low1/pdfmax),0.434*(upp1/pdfmax),L5100_
 
@@ -486,7 +481,6 @@ def halpha_to_agn_lum(L,L_low,L_upp,n_samp=1000):
 	# Make distribution and get best-fit MBH and uncertainties
 	n, bins = np.histogram(L5100_,bins='doane', density=True)#, facecolor='xkcd:cerulean blue', alpha=0.75)
 	pdfmax,low1,upp1,xvec,yvec = conf_int(get_bin_centers(bins),n,100,L5100_)
-	# print np.log10(pdfmax),0.434*(low1/pdfmax),0.434*(upp1/pdfmax)
 	#
 	return np.log10(pdfmax),0.434*(low1/pdfmax),0.434*(upp1/pdfmax),L5100_
 
@@ -524,7 +518,6 @@ def estimate_BH_mass_hbeta(fwhm,fwhm_low,fwhm_upp,L5100,n_samp=1000):
 	# Make distribution and get best-fit MBH and uncertainties
 	n, bins = np.histogram(MBH_,bins='doane', density=True)#, facecolor='xkcd:cerulean blue', alpha=0.75)
 	pdfmax,low1,upp1,xvec,yvec = conf_int(get_bin_centers(bins),n,100,MBH_)
-	# print np.log10(pdfmax),0.434*(low1/pdfmax),0.434*(upp1/pdfmax)
 	#
 	return np.log10(pdfmax),0.434*(low1/pdfmax),0.434*(upp1/pdfmax)
 
@@ -571,7 +564,6 @@ def estimate_BH_mass_halpha(fwhm,fwhm_low,fwhm_upp,L5100,n_samp=1000):
 	# Make distribution and get best-fit MBH and uncertainties
 	n, bins = np.histogram(MBH_,bins='doane', density=True)#, facecolor='xkcd:cerulean blue', alpha=0.75)
 	pdfmax,low1,upp1,xvec,yvec = conf_int(get_bin_centers(bins),n,100,MBH_)
-	# print np.log10(pdfmax),0.434*(low1/pdfmax),0.434*(upp1/pdfmax)
 	#
 	return np.log10(pdfmax),0.434*(low1/pdfmax),0.434*(upp1/pdfmax)
 
@@ -638,7 +630,6 @@ def setup_dirs(work_dir):
         # Create the first MCMC_output file starting with index 1
         new_fold = work_dir+'MCMC_output_'+fnum+'/'
         prev_fold = work_dir+'MCMC_output_'+prev_num+'/'
-        # print new_fold
         os.mkdir(new_fold)
         run_dir = new_fold
         if os.path.exists(prev_fold+'MCMC_chain.csv')==True:
@@ -646,7 +637,6 @@ def setup_dirs(work_dir):
         else:
             prev_dir = prev_fold
         print(' Storing MCMC_output in %s' % run_dir)
-        # break
 
     return run_dir,prev_dir
 
@@ -688,16 +678,12 @@ def determine_fit_reg(file,good_thresh,run_dir,fit_reg='auto'):
 	t = hdu['COADD'].data
 	lam_gal = (10**(t['loglam']))/(1+z)
 
-	#mask = ((lam_gal > 4230.) & (lam_gal < 5150.))
-
-	#lam_gal = lam_gal#[mask]
-	gal  = t['flux']#[mask]
-	ivar = t['ivar']#[mask]
-	and_mask = t['and_mask']#[mask]
+	gal  = t['flux']
+	ivar = t['ivar']
+	and_mask = t['and_mask']
 	# Edges of wavelength vector
 	first_good = lam_gal[0]
 	last_good  = lam_gal[-1]
-	# print first_good,last_good
 
 	if ((fit_reg=='auto') or (fit_reg is None) or (fit_reg=='full')):
 		# The lower limit of the spectrum must be the lower limit of our stellar templates
@@ -720,7 +706,6 @@ def determine_fit_reg(file,good_thresh,run_dir,fit_reg='auto'):
 			return None, None
 		else:
 			man_low = np.max([3500.,first_good,fit_reg[0]])
-			# print man_low
 			man_upper_bound  = determine_upper_bound(fit_reg[0],fit_reg[1])
 			man_upp = np.min([man_upper_bound,fit_reg[1],last_good])
 			new_fit_reg = (int(man_low),int(man_upp))
@@ -937,9 +922,6 @@ def sdss_prepare(file,fit_reg,temp_dir,run_dir,plot=False):
 	fwhm_gal = fwhm_gal/(1+z)   # Adjust resolution in Angstrom
 
 	val,idx = find_nearest(lam_gal,5175)
-	# print fwhm_gal[idx]*c/lam_gal[idx]/2.355, fwhm_gal[idx]/2.355
-
-	# sys.exit()
 
 	# Read the list of filenames from the Single Stellar Population library
 	# by Vazdekis (2010, MNRAS, 404, 1639) http://miles.iac.es/. A subset
@@ -1075,9 +1057,6 @@ def sdss_prepare(file,fit_reg,temp_dir,run_dir,plot=False):
 	return lam_gal,galaxy,noise,velscale,vsyst,temp_list,z,ebv,npix,ntemp,temp_fft,npad
 
 ##################################################################################
-
-
-
 
 #### Initialize Parameters #######################################################
 
@@ -1589,10 +1568,6 @@ def outflow_test(lam_gal,galaxy,noise,run_dir,velscale,mcbs_niter):
 	                             fit_power=True,fit_broad=True,
 	                             fit_narrow=True,fit_outflows=True)
 
-	# for key in param_dict:
-	# 	print key
-	# if 1: sys.exit()
-
 	gal_temp = galaxy_template(lam_gal,age=5.0)
 	na_feii_temp,br_feii_temp = initialize_feii(lam_gal,velscale,fit_reg)
 
@@ -1619,7 +1594,7 @@ def outflow_test(lam_gal,galaxy,noise,run_dir,velscale,mcbs_niter):
 	# Determine the significance of outflows
 	# Outflow criteria:
 	#	(1) FWHM test: (FWHM_outflow - dFWHM_outflow) > (FWHM_core + dFWHM_core)
-	cond1 = ((rdict['na_oiii5007_outflow_fwhm']['med']-rdict['na_oiii5007_outflow_fwhm']['std']) > (rdict['na_oiii5007_core_fwhm']['med']+rdict['na_oiii5007_core_fwhm']['std'])) & (rdict['na_oiii5007_outflow_fwhm']['std']/rdict['na_oiii5007_outflow_fwhm']['med'] <= 0.10)
+	cond1 = ((rdict['na_oiii5007_outflow_fwhm']['med']-rdict['na_oiii5007_outflow_fwhm']['std']) > (rdict['na_oiii5007_core_fwhm']['med']+rdict['na_oiii5007_core_fwhm']['std'])) & (rdict['na_oiii5007_outflow_fwhm']['std']/rdict['na_oiii5007_outflow_fwhm']['med'] <= 0.25)
 	if (cond1==True):
 		print('          Outflow FWHM condition: Pass')
 	elif (cond1==False):
@@ -1640,7 +1615,7 @@ def outflow_test(lam_gal,galaxy,noise,run_dir,velscale,mcbs_niter):
 	if (all([cond1,cond2,cond3])==True):
 		write_log((cond1,cond2,cond3),20,run_dir)
 		return True,rdict,sigma
-	elif (any([cond1,cond2,cond3])==False):
+	elif (all([cond1,cond2,cond3])==False):
 		write_log((cond1,cond2,cond3),21,run_dir)
 		return False,rdict,sigma
 
@@ -1659,10 +1634,6 @@ def max_likelihood(param_dict,lam_gal,galaxy,noise,gal_temp,na_feii_temp,br_feii
 	param_names  = [param_dict[key]['name'] for key in param_dict ]
 	params       = [param_dict[key]['init'] for key in param_dict ]
 	bounds       = [param_dict[key]['plim'] for key in param_dict ]
-
-	# for i in range(0,len(params),1):
-	# 	print param_names[i], params[i], bounds[i]
-	# if 1: sys.exit()
 
 	# Constraints for Outflow components
 	def oiii_amp_constraint(p):
@@ -1774,8 +1745,6 @@ def max_likelihood(param_dict,lam_gal,galaxy,noise,gal_temp,na_feii_temp,br_feii
 		fit_type     = 'monte_carlo'
 		output_model = False
 
-		# for i,name in enumerate(param_names): print name,par_best[i]
-
 		comp_dict = fit_model(par_best,param_names,lam_gal,galaxy,noise,gal_temp,na_feii_temp,br_feii_temp,
 							  temp_list,temp_fft,npad,velscale,npix,vsyst,run_dir,
 							  fit_type,output_model)
@@ -1864,7 +1833,6 @@ def max_likelihood(param_dict,lam_gal,galaxy,noise,gal_temp,na_feii_temp,br_feii
 	elif (monte_carlo==False):
 
 		if 1: # Set to 1 to plot and stop
-			# print result['x']
 			output_model = True
 			comp_dict = fit_model(result['x'],param_names,
 					              lam_gal,galaxy,noise,gal_temp,na_feii_temp,br_feii_temp,
@@ -2022,8 +1990,6 @@ def fit_model(params,param_names,lam_gal,galaxy,noise,gal_temp,na_feii_temp,br_f
 	keys = param_names
 	values = params
 	p = dict(zip(keys, values))
-	# if 1: sys.exit()
-	# print p
 	c = 299792.458 # speed of light
 	host_model = np.copy(galaxy)
 	comp_dict  = {} 
@@ -2033,7 +1999,6 @@ def fit_model(params,param_names,lam_gal,galaxy,noise,gal_temp,na_feii_temp,br_f
 	# if all(comp in param_names for comp in ['power_amp','power_slope','power_break'])==True:
 	if all(comp in param_names for comp in ['power_amp','power_slope'])==True:
 
-		# print p['power_slope'],p['power_amp']
 		# Create a template model for the power-law continuum
 		# power = simple_power_law(lam_gal,p['power_amp'],p['power_slope'],p['power_break']) # 
 		power = simple_power_law(lam_gal,p['power_amp'],p['power_slope']) # 
@@ -2717,8 +2682,6 @@ def gaussian(x,center,amp,fwhm,voff,velscale):
     voff_pix = voff/velscale
     center_pix = center_pix + voff_pix
     
-    # print center_pix,sigma_pix,voff_pix
-
     g = amp*np.exp(-0.5*(x_pix-(center_pix))**2/(sigma_pix)**2)
     
     # Make sure edges of gaussian are zero 
@@ -2731,7 +2694,6 @@ def gaussian(x,center,amp,fwhm,voff,velscale):
 
 
 ##################################################################################
-
 
 # pPXF Routines (from Cappellari 2017)
 
@@ -2910,7 +2872,6 @@ def convolve_gauss_hermite(templates_rfft,npad, velscale, start, npix,
 #     templates = templates.reshape(npix_temp, -1)
     start = np.array(start)  # make copy
     start[:2] /= velscale
-# #     print start
     vsyst /= velscale
 
 #     npad = fftpack.next_fast_len(npix_temp)
@@ -3028,7 +2989,7 @@ def run_emcee(pos,ndim,nwalkers,run_dir,lnprob_args,init_params,param_names,
 				raise ValueError('\n One of more paramters in conv_type is not a valid parameter.\n')
 		write_log((min_samp,autocorr_tol,ncor_times,conv_type),41,run_dir)
 	# Run emcee
-	for k, result in enumerate(sampler.sample(pos, iterations=max_iter,storechain=True)):
+	for k, result in enumerate(sampler.sample(pos, iterations=max_iter)):#,storechain=True)):
 		if ((k+1) % write_iter == 0) and ((k+1)>=write_thresh): # Write every [write_iter] iteration
 			# Chain location for each parameter
 			# Median of last 100 positions for each walker.
@@ -3058,8 +3019,6 @@ def run_emcee(pos,ndim,nwalkers,run_dir,lnprob_args,init_params,param_names,
 			autocorr_chain.append(tau) # 
 			# Calculate tolerances
 			tol = (np.abs(tau-old_tau)/old_tau) * 100.0
-			# print tau
-			# print tol
 
 			# If convergence for mean autocorrelation time 
 			if (conv_type == 'mean'):
@@ -3445,10 +3404,8 @@ def conf_int(x,prob,factor,flat): # Function for calculating an arbitrary confid
     pdfnew = pdfnew / np.sum(pdfnew) # * factor # Re-sampling increases probability - must renormalize
     max_after = np.max(pdfnew)# maximum after interpolation and renormalization
     scale_factor = max_before/max_after
-#     print scale_factor
     # Get the max (most probable) value of the interpolated function
     pdfmax = xnew[np.where(np.isclose(pdfnew,np.max(pdfnew)))][0]
-#     print pdfmax,scale_factor
     # Get x-values to the left of the maximum 
     xh_left = xnew[np.where(xnew < pdfmax)]
     yh_left = pdfnew[np.where(xnew < pdfmax)]
@@ -3456,7 +3413,6 @@ def conf_int(x,prob,factor,flat): # Function for calculating an arbitrary confid
     # Get x-values to the right of the maximum 
     xh_right = xnew[np.where(xnew > pdfmax)]
     yh_right = pdfnew[np.where(xnew > pdfmax)]
-#     print len(yh_right)
     try:
 #     if 1:
         for l in range(0,len(yh_right),1):
@@ -3464,7 +3420,6 @@ def conf_int(x,prob,factor,flat): # Function for calculating an arbitrary confid
             xvec = xnew[[i for i,j in enumerate(xnew) if xh_left[idx]<=j<=xh_right[l]]] # x vector for simps
             yvec = pdfnew[[i for i,j in enumerate(xnew) if xh_left[idx]<=j<=xh_right[l]]] # y vector for simps
             integral = simps(y=yvec)#,x=xvec)
-#             print l,round(integral,2),np.min(xvec),np.max(xvec)
             if round(integral,2) == 0.68: #68.0/100.0:
                 # 1 sigma = 68% confidence interval
                 conf_interval_1 = [pdfmax - np.min(xvec),np.max(xvec) - pdfmax]
@@ -3472,11 +3427,7 @@ def conf_int(x,prob,factor,flat): # Function for calculating an arbitrary confid
         return pdfmax,conf_interval_1[0],conf_interval_1[1],xvec,yvec*scale_factor
 
     except: 
-        # print("\n          Error: Cannot determine confidence interval.  Using median and std. dev. from flattened chain...")
-        # mode = x[np.where(prob==np.max(prob))]
-        # mean = simps(x*prob,x)
         med = np.median(flat)
-        # std = np.sqrt(simps((x-mean)**2*prob,x))
         std = np.std(flat)
         return med,std,std,x,np.zeros(len(prob))
 
@@ -3554,8 +3505,6 @@ def param_plots(param_dict,burn_in,run_dir,save_plots=True):
 		# Calculate median and median absolute deviation of walkers at each iteration; we have depreciated
 		# the average and standard deviation because they do not behave well for outlier walkers, which
 		# also don't agree with histograms.
-		# c_avg = np.mean(chain,axis=0)
-		# c_std = np.std(chain,axis=0)
 		c_med = np.median(chain,axis=0)
 		c_madstd = mad_std(chain)
 		ax3.plot(range(np.shape(chain)[1]),c_med,color='xkcd:red',alpha=1.,linewidth=2.0,label='Median',zorder=10)
@@ -3656,8 +3605,6 @@ def emline_flux_plots(burn_in,nwalkers,run_dir,save_plots=True):
 		# Plot 3: Chain plot
 		ax3.plot(range(np.shape(chain)[0]),chain,color='white',linewidth=0.5,alpha=1.0,zorder=0)
 		# Calculate meanand standard deviation of walkers at each iteration 
-		# c_avg = np.median(chain[burn_in:],axis=0)
-		# c_std = np.std(chain[burn_in:],axis=0)
 		c_med = np.median(chain,axis=0)
 		c_madstd = mad_std(chain)
 		ax3.plot(range(np.shape(chain)[0])[burn_in:],np.full(np.shape(chain[burn_in:])[0],c_med),color='xkcd:red',alpha=1.,linewidth=2.0,label='Median',zorder=10)
@@ -3691,11 +3638,6 @@ def flux2lum(flux_dict,burn_in,nwalkers,z,run_dir,H0=71.0,Om0=0.27,save_plots=Tr
 	# Create a histograms sub-folder
 	if (os.path.exists(run_dir + 'histogram_plots/lum_histograms')==False):
 		os.mkdir(run_dir + 'histogram_plots/lum_histograms')
-
-	# Extract flux dict and keys
-	# lum_keys = []
-	# for key in flux_dict:
-	# 	keys.append(key[:-4]+'lum')
    
 	# Create a flux dictionary
 	lum_dict = {}
@@ -3767,8 +3709,6 @@ def flux2lum(flux_dict,burn_in,nwalkers,z,run_dir,H0=71.0,Om0=0.27,save_plots=Tr
 		# Plot 3: Chain plot
 		ax3.plot(range(np.shape(chain)[0]),chain,color='white',linewidth=0.5,alpha=1.0,zorder=0)
 		# Calculate meanand standard deviation of walkers at each iteration 
-		# c_avg = np.median(chain[burn_in:],axis=0)
-		# c_std = np.std(chain[burn_in:],axis=0)
 		c_med = np.median(chain,axis=0)
 		c_madstd = mad_std(chain)
 		ax3.plot(range(np.shape(chain)[0])[burn_in:],np.full(np.shape(chain[burn_in:])[0],c_med),color='xkcd:red',alpha=1.,linewidth=2.0,label='Median',zorder=10)
@@ -3821,10 +3761,9 @@ def write_param(param_dict,flux_dict,lum_dict,run_dir):
 	    par_best.append(lum_dict[key]['par_best'])
 	    sig_low.append(lum_dict[key]['sig_low'])
 	    sig_upp.append(lum_dict[key]['sig_upp']) 
-	# Print pars 
 	if 0: 
 	    for i in range(0,len(par_names),1):
-	        print par_names[i],par_best[i],sig_low[i],sig_upp[i]
+	        print(par_names[i],par_best[i],sig_low[i],sig_upp[i])
 	# Write best-fit paramters to FITS table
 	col1 = fits.Column(name='parameter', format='20A', array=par_names)
 	col2 = fits.Column(name='best_fit', format='E', array=par_best)
