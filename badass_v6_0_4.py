@@ -97,7 +97,7 @@ def run_BADASS(file,run_dir,temp_dir,
 	                             tie_narrow=tie_narrow)
 
 	# By generating the galaxy and FeII templates before, instead of generating them with each iteration, we save a lot of time
-	gal_temp = galaxy_template(lam_gal,age=5.0) # 'age=None' option selections a NLS1 template
+	gal_temp = galaxy_template(lam_gal,age=5.0) 
 	if (fit_feii==True):
 	    na_feii_temp,br_feii_temp = initialize_feii(lam_gal,velscale,fit_reg)
 	elif (fit_feii==False):
