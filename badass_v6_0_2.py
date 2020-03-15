@@ -26,10 +26,8 @@ from os import path
 import os
 import shutil
 import sys
-import psutil
 import emcee
 from astropy.stats import mad_std
-import ntpath
 from astroquery.irsa_dust import IrsaDust
 import astropy.units as u
 from astropy import coordinates
@@ -43,7 +41,8 @@ import warnings
 warnings.filterwarnings("ignore", category=RuntimeWarning) 
 warnings.filterwarnings("ignore", category=UserWarning) 
 import gc # Garbage collector
-#####################################################
+##################################################################################
+
 
 #### Run BADASS ##################################################################
 
@@ -51,7 +50,7 @@ def run_BADASS(file,run_dir,temp_dir,
 			   fit_reg=(4400,5800),good_thresh=0.60,test_outflows=True,mcbs_niter=10,
 			   fit_feii=True,fit_losvd=True,fit_host=True,fit_power=True,
                fit_broad=True,fit_narrow=True,fit_outflows=True,tie_narrow=False,
-			   auto_stop=True,conv_type='all',min_samp=2500,ncor_times=2.5,autocorr_tol=5.0,
+			   nwalkers=100,auto_stop=True,conv_type='all',min_samp=2500,ncor_times=2.5,autocorr_tol=5.0,
 			   write_iter=100,write_thresh=100,burn_in=23500,min_iter=2500,max_iter=25000,threads=1,
 			   ):
 	# This is the main function responsible for executing the fitting steps in order
@@ -141,8 +140,13 @@ def run_BADASS(file,run_dir,temp_dir,
 	param_names  = [param_dict[key]['name'] for key in param_dict ]
 	init_params  = [param_dict[key]['init'] for key in param_dict ]
 	bounds       = [param_dict[key]['plim'] for key in param_dict ]
+
+	# Check number of walkers
+	# If number of walkers < 2*(# of params) (the minimum required), then set it to that
+	if nwalkers<2*len(param_names):
+		print('\n Number of walkers < 2 x (# of parameters)!.  Setting nwalkers = %d' % (2*len(param_names)))
 	
-	ndim, nwalkers = len(init_params), 50# 2*len(param_names)#50 # minimum walkers = 2*len(params)
+	ndim, nwalkers = len(init_params), nwalkers # minimum walkers = 2*len(params)
 	# initialize walker starting positions based on parameter estimation from Maximum Likelihood fitting
 	pos = [init_params + 1.0e-4*np.random.randn(ndim) for i in range(nwalkers)]
 	# Run emcee
@@ -189,9 +193,9 @@ def run_BADASS(file,run_dir,temp_dir,
 	if ('br_Ha_fwhm' in param_dict) and ('br_Ha_lum' in lum_dict):
 		print('\n Estimating black hole mass from Broad H-alpha FWHM and luminosity...')
 		print('----------------------------------------------------------------------------------------------------')
-		L5100_Ha = hbeta_to_agn_lum(lum_dict['br_Ha_lum']['par_best'],lum_dict['br_Ha_lum']['sig_low'],lum_dict['br_Ha_lum']['sig_upp'])
+		L5100_Ha = halpha_to_agn_lum(lum_dict['br_Ha_lum']['par_best'],lum_dict['br_Ha_lum']['sig_low'],lum_dict['br_Ha_lum']['sig_upp'])
 		print('\n     AGN Luminosity: log10(L5100) = %0.2f (-%0.2f, +%0.2f)' % (L5100_Ha[0],L5100_Ha[1],L5100_Ha[2]))
-		log_MBH_Halpha = estimate_BH_mass_halpha(param_dict['br_Ha_fwhm']['par_best'],param_dict['br_Ha_fwhm']['sig_low'],param_dict['br_Ha_fwhm']['sig_upp'],L5100_Hb[3])
+		log_MBH_Halpha = estimate_BH_mass_halpha(param_dict['br_Ha_fwhm']['par_best'],param_dict['br_Ha_fwhm']['sig_low'],param_dict['br_Ha_fwhm']['sig_upp'],L5100_Ha[3])
 		print('\n     BH Mass:         log10(M_BH) = %0.2f (-%0.2f, +%0.2f)' % (log_MBH_Halpha[0],log_MBH_Halpha[1],log_MBH_Halpha[2]))
 		# Write to log files
 		write_log((L5100_Ha,log_MBH_Halpha),61,run_dir)
@@ -436,6 +440,7 @@ def hbeta_to_agn_lum(L,L_low,L_upp,n_samp=1000):
 	L_hbeta = np.random.choice(a=x_L,size=n_samp,p=p_L,replace=True) * 1.e+42
 	#
 	L5100_ = A_ * 1.e+44 * (L_hbeta/1.e+42)**(B_)
+	L5100_[L5100_/L5100_ != 1] = 0.0
 	# Make distribution and get best-fit MBH and uncertainties
 	n, bins = np.histogram(L5100_,bins='doane', density=True)#, facecolor='xkcd:cerulean blue', alpha=0.75)
 	pdfmax,low1,upp1,xvec,yvec = conf_int(get_bin_centers(bins),n,100,L5100_)
@@ -478,6 +483,7 @@ def halpha_to_agn_lum(L,L_low,L_upp,n_samp=1000):
 	L_halpha = np.random.choice(a=x_L,size=n_samp,p=p_L,replace=True) * 1.e+42
 	#
 	L5100_ = A_ * 1.e+44 * (L_halpha/1.e+42)**(B_)
+	L5100_[L5100_/L5100_ != 1] = 0.0
 	# Make distribution and get best-fit MBH and uncertainties
 	n, bins = np.histogram(L5100_,bins='doane', density=True)#, facecolor='xkcd:cerulean blue', alpha=0.75)
 	pdfmax,low1,upp1,xvec,yvec = conf_int(get_bin_centers(bins),n,100,L5100_)
@@ -1594,7 +1600,7 @@ def outflow_test(lam_gal,galaxy,noise,run_dir,velscale,mcbs_niter):
 	# Determine the significance of outflows
 	# Outflow criteria:
 	#	(1) FWHM test: (FWHM_outflow - dFWHM_outflow) > (FWHM_core + dFWHM_core)
-	cond1 = ((rdict['na_oiii5007_outflow_fwhm']['med']-rdict['na_oiii5007_outflow_fwhm']['std']) > (rdict['na_oiii5007_core_fwhm']['med']+rdict['na_oiii5007_core_fwhm']['std'])) & (rdict['na_oiii5007_outflow_fwhm']['std']/rdict['na_oiii5007_outflow_fwhm']['med'] <= 0.25)
+	cond1 = ((rdict['na_oiii5007_outflow_fwhm']['med']-rdict['na_oiii5007_outflow_fwhm']['std']) > (rdict['na_oiii5007_core_fwhm']['med']+rdict['na_oiii5007_core_fwhm']['std']))
 	if (cond1==True):
 		print('          Outflow FWHM condition: Pass')
 	elif (cond1==False):
@@ -2990,6 +2996,10 @@ def run_emcee(pos,ndim,nwalkers,run_dir,lnprob_args,init_params,param_names,
 		write_log((min_samp,autocorr_tol,ncor_times,conv_type),41,run_dir)
 	# Run emcee
 	for k, result in enumerate(sampler.sample(pos, iterations=max_iter)):#,storechain=True)):
+		if ((k+1) % write_iter == 0) and ((k+1)>=write_thresh) and ((k+1)<min_iter): 
+			print('\nIteration = %d' % (k+1))
+		if ((k+1) % write_iter == 0) and ((k+1)>=write_thresh) and ((k+1)>=min_iter) and (auto_stop==False):
+			print('\nIteration = %d' % (k+1))
 		if ((k+1) % write_iter == 0) and ((k+1)>=write_thresh): # Write every [write_iter] iteration
 			# Chain location for each parameter
 			# Median of last 100 positions for each walker.
@@ -3130,7 +3140,7 @@ def run_emcee(pos,ndim,nwalkers,run_dir,lnprob_args,init_params,param_names,
 					print('\nIteration = %d' % (k+1))
 					print('-------------------------------------------------------------------------------')
 					print('- Not enough iterations for any autocorrelation times!')
-				elif all( ((k+1)>(x * ncor_times)) for x in tau) and all(y<autocorr_tol for y in tol) and (stop_iter == max_iter):
+				elif all( ((k+1)>(x * ncor_times)) for x in tau) and all( (x>1.0) for x in tau) and all(y<autocorr_tol for y in tol) and (stop_iter == max_iter):
 						print('\n ---------------------------------------------')
 						print(' | Converged at %d iterations.              | ' % (k+1))
 						print(' | Performing %d iterations of sampling... | ' % min_samp )
@@ -3140,7 +3150,7 @@ def run_emcee(pos,ndim,nwalkers,run_dir,lnprob_args,init_params,param_names,
 						stop_iter = (k+1)+min_samp
 						conv_tau = tau
 						converged = True
-				elif (any( ((k+1)<(x * ncor_times)) for x in tau) or any(y>autocorr_tol for y in tol)) and (stop_iter < orig_max_iter):
+				elif (any( ((k+1)<(x * ncor_times)) for x in tau) or any( (x==1.0) for x in tau) or any(y>autocorr_tol for y in tol)) and (stop_iter < orig_max_iter):
 					print('\n Iteration = %d' % (k+1))
 					print('-------------------------------------------------------------------------------')
 					print('- Jumped out of convergence! Resetting convergence criteria...')
@@ -3183,7 +3193,7 @@ def run_emcee(pos,ndim,nwalkers,run_dir,lnprob_args,init_params,param_names,
 					print('\nIteration = %d' % (k+1))
 					print('-------------------------------------------------------------------------------')
 					print('- Not enough iterations for any autocorrelation times!')
-				elif all( ((k+1)>(x * ncor_times)) for x in tau_interest) and all(y<autocorr_tol for y in tol_interest) and (stop_iter == max_iter):
+				elif all( ((k+1)>(x * ncor_times)) for x in tau_interest) and all( (x>1.0) for x in tau_interest) and all(y<autocorr_tol for y in tol_interest) and (stop_iter == max_iter):
 						print('\n ---------------------------------------------')
 						print(' | Converged at %d iterations.              | ' % (k+1))
 						print(' | Performing %d iterations of sampling... | ' % min_samp )
@@ -3193,7 +3203,7 @@ def run_emcee(pos,ndim,nwalkers,run_dir,lnprob_args,init_params,param_names,
 						stop_iter = (k+1)+min_samp
 						conv_tau = tau
 						converged = True
-				elif (any( ((k+1)<(x * ncor_times)) for x in tau_interest) or any(y>autocorr_tol for y in tol_interest)) and (stop_iter < orig_max_iter):
+				elif (any( ((k+1)<(x * ncor_times)) for x in tau_interest) or any( (x==1.0) for x in tau_interest) or any(y>autocorr_tol for y in tol_interest)) and (stop_iter < orig_max_iter):
 					print('\n Iteration = %d' % (k+1))
 					print('-------------------------------------------------------------------------------')
 					print('- Jumped out of convergence! Resetting convergence criteria...')
@@ -3765,7 +3775,7 @@ def write_param(param_dict,flux_dict,lum_dict,run_dir):
 	    for i in range(0,len(par_names),1):
 	        print(par_names[i],par_best[i],sig_low[i],sig_upp[i])
 	# Write best-fit paramters to FITS table
-	col1 = fits.Column(name='parameter', format='20A', array=par_names)
+	col1 = fits.Column(name='parameter', format='30A', array=par_names)
 	col2 = fits.Column(name='best_fit', format='E', array=par_best)
 	col3 = fits.Column(name='sigma_low', format='E', array=sig_low)
 	col4 = fits.Column(name='sigma_upp', format='E', array=sig_upp)
@@ -3830,6 +3840,9 @@ def plot_best_model(param_dict,lam_gal,galaxy,noise,gal_temp,na_feii_temp,br_fei
 		# Galaxy + Best-fit Model
 		if (key is not 'residuals') and (key is not 'noise') and (key is not 'wave') and (key is not 'data'):
 			ax1.plot(lam_gal,comp_dict[key]['comp'],linewidth=comp_dict[key]['linewidth'],color=comp_dict[key]['pcolor'],label=key,zorder=15)
+		if (key not in ['residuals','noise','wave','data','model','na_feii_template','br_feii_template','host_galaxy','power']):
+			ax1.axvline(lam_gal[np.where(comp_dict[key]['comp']==np.max(comp_dict[key]['comp']))[0][0]],color='xkcd:white',linestyle='--',linewidth=0.5)
+			ax2.axvline(lam_gal[np.where(comp_dict[key]['comp']==np.max(comp_dict[key]['comp']))[0][0]],color='xkcd:white',linestyle='--',linewidth=0.5)
 
 	ax1.plot(lam_gal,comp_dict['data']['comp'],linewidth=0.5,color='white',label='data',zorder=0)
 
@@ -3995,7 +4008,7 @@ Outflow amplitude condition: %s
 		logfile.write('\n{0:<30}{1:<25}'.format('ndim'        , ndim ))
 		logfile.write('\n{0:<30}{1:<25}'.format('nwalkers'    , nwalkers ))
 		logfile.write('\n{0:<30}{1:<25}'.format('auto_stop'   , str(auto_stop) ))
-		logfile.write('\n{0:<30}{1:<25}'.format('conv_type'   , conv_type ))
+		# logfile.write('\n{0:<30}{1:<25}'.format('conv_type'   , conv_type ))
 		logfile.write('\n{0:<30}{1:<25}'.format('user burn_in', burn_in ))
 		logfile.write('\n{0:<30}{1:<25}'.format('write_iter'  , write_iter ))
 		logfile.write('\n{0:<30}{1:<25}'.format('write_thresh', write_thresh ))
