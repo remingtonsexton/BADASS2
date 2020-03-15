@@ -47,7 +47,7 @@ import gc # Garbage collector
 #### Run BADASS ##################################################################
 
 def run_BADASS(file,run_dir,temp_dir,
-			   fit_reg=(4400,5800),good_thresh=0.60,test_outflows=True,mcbs_niter=10,
+			   fit_reg=(4400,5800),good_thresh=0.60,test_outflows=True,mcbs_niter=10,min_sn_losvd=2,
 			   fit_feii=True,fit_losvd=True,fit_host=True,fit_power=True,
                fit_broad=True,fit_narrow=True,fit_outflows=True,tie_narrow=False,
 			   nwalkers=100,auto_stop=True,conv_type='all',min_samp=2500,ncor_times=2.5,autocorr_tol=5.0,
@@ -109,9 +109,9 @@ def run_BADASS(file,run_dir,temp_dir,
 	
 	# If the total continuum level is < 10, disable the host-galaxy and losvd components 
 	# (there is no point in fitting them because the fits will be horrible)
-	if (sn<0.1):
+	if (sn<min_sn_losvd):
 	    print('\n Continuum S/N = %0.2f' % sn)
-	    print('\n Total continuum level < 10.  Disabling host_galaxy/LOSVD components...\n')
+	    print('\n Total continuum level < %0.1f.  Disabling host_galaxy/LOSVD components...\n' % (min_sn_losvd))
 	    fit_host  = True
 	    fit_losvd = False
 
