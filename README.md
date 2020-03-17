@@ -16,3 +16,29 @@ If you use BADASS for any of your fits, I'd be interested to know what you're do
 
 * TOC 
 {:toc}
+
+# Installation
+
+The easiest way to get started is to simply clone the repository. 
+
+As of BADASS v6.0.1, the following packages are required (Python 2.7):
+- `numpy 1.11.3`
+- `scipy 1.1.0`
+- `pandas 0.23.4`
+- `matplotlib 2.2.3`
+- `astropy 2.0.9`
+- `astroquery 0.3.9`
+- `emcee 2.2.1`
+- `natsort 5.5.0`
+
+The code is run entirely through the Jupyter Notebook interface, and is set up to run on the four included SDSS spectra in the ".../example_spectra/" folder, one at a time.  If one chooses to fit numerous spectra consecutively, this is the recommended directory structure:
+
+![](https://github.com/remingtonsexton/BADASS2/blob/master/figures/BADASS_example_spectra.png)
+
+Simply create a folder containing the SDSS FITS format spectrum, and BADASS will generate a working folder for each fit titled "MCMC_output_#".  BADASS automatically generates a new output folder if the same object is fit again (it does not delete previous fits).
+
+In the Notebook, one need only specify the location of the spectra, the location of the BADASS support files, and the location of the templates for pPXF, as shown below:
+
+![](https://github.com/remingtonsexton/BADASS2/blob/master/figures/BADASS_directory_structure.png)
+
+
