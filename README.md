@@ -14,4 +14,4 @@ If you use BADASS for any of your fits, I'd be interested to know what you're do
 </b>
 
 
-* TOC {:toc}
+{:toc}
