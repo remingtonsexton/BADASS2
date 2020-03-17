@@ -191,3 +191,12 @@ which shows
 
 Please let us know if you wish to contribute to this project by reporting any bugs, issuing pull requests, or requesting any additional features to help make BADASS the most detailed spectroscopic analysis tool in astronomy.
 
+# Credits
+
+#### [Remington Oliver Sexton](https://astro.ucr.edu/members/graduate-students/#Remington) (UC Riverside, Physics & Astronomy)
+
+#### William Matzko (George Mason University, Physics and Astronomy)
+
+#### Nicholas Darden (UC Riverside, Physics & Astronomy)
+
+
