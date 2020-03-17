@@ -115,3 +115,75 @@ All of the above options are fed into the `run_BADASS()` function as such:
 
 ![](https://github.com/remingtonsexton/BADASS2/blob/master/figures/BADASS_usage_4.png)
 
+# Output
+
+BADASS produces a number of different outputs for the user at the end of the fitting process.  We summarize these below.
+
+## Best-fit Model
+
+This is simply a figure that shows the data, model, residuals, and best-fit components, to visually ascertain the quality of the fit. 
+
+![](https://github.com/remingtonsexton/BADASS2/blob/master/figures/BADASS_output_bestfit.png)
+
+## Parameter Chains, Histograms, Best-fit Values & Uncertainties
+
+For every parameter that is fit, BADASS outputs a figure to visualize the full parameter chain and all walkers, the burn-in, and the final posterior histogram with the best-fit values and uncertainties.  The purpose of these is for visual inspection of the parameter chain to observe its behavior during the fitting process, to get a sense of how well initial parameters were fit, and how walkers behave as the fit progresses.
+
+![](https://github.com/remingtonsexton/BADASS2/blob/master/figures/BADASS_output_chain.png)
+
+## Log File
+
+The entire fitting process, including selected options, is recorded in a text file for reference purposes.  It provides:
+- File location
+- FITS Header information, such as (RA,DEC) coordinates, SDSS redshift, velocity scale (km/s/pixel), and *E(B-V)*, which is retrieved from NED online during the fitting process and used to correct for Galactic extinction.
+- Outflow fitting results (if `test_outflows=True`)
+- Initial fitting parameters
+- Autocorrelation times and tolerances for each parameter (if `auto_stop=True`)
+- Final MCMC parameter best-fit values and uncertainties 
+- Systemic redshift measured from stellar velocity (if `fit_losvd=True`)
+- AGN luminosities at 5100 Å inferred from broad-line luminosity relation ([Greene et al. 2005](https://ui.adsabs.harvard.edu/abs/2005ApJ...630..122G/abstract))
+- Black hole mass estimates using broad H-beta ([Sexton et al. 2019](https://ui.adsabs.harvard.edu/abs/2019ApJ...878..101S/abstract)) and broad H-alpha ([Woo et al. 2015](https://ui.adsabs.harvard.edu/abs/2015ApJ...801...38W/abstract)) measurements.
+
+![](https://github.com/remingtonsexton/BADASS2/blob/master/figures/BADASS_output_logfile.png)
+
+## Best-fit Model Components
+
+Best-fit model components are stored as arrays in `best_model_components.fits` files to reproduce the best-fit model figures as shown above.  This can be accessed using the [`astropy.io.fits`](https://docs.astropy.org/en/stable/io/fits/) module, for example:
+```
+from astropy.io import fits
+
+hdu = fits.open(best_model_components.fits)
+tbdata = hdu[1].data     # FITS table data is stored on FITS extension 1
+data   = tbdata['data']  # the SDSS spectrum 
+wave   = tbdata['wave']  # the rest-frame wavelength vector
+model  = tbdata['model'] # the best-fit model
+hdu.close()
+```
+
+Below we show an example data model for the FITS-HDU of `best_model_components.fits`.  You can print out the columns using 
+```
+print(tbdata.columns)
+```
+which shows
+
+<p align="center">
+<img src="https://github.com/remingtonsexton/BADASS2/blob/master/figures/BADASS_output_bestfit_comp.png" width="400" />
+</p>
+
+## Best-fit Parameters & Uncertainties 
+
+All best-fit parameter values and their upper and lower 1-sigma uncertainties are stored in `par_table.fits` files so they can be more quickly accessed than from a text file.  These are most easily accessed using the (`astropy.table`](https://docs.astropy.org/en/stable/table/pandas.html) module, which can convert a FITS table into a Pandas [DataFrame](https://pandas.pydata.org/pandas-docs/stable/reference/api/pandas.DataFrame.html):
+
+```
+from astropy.table import Table  
+
+table = Table.read('par_table.fits')
+pandas_df = table.to_pandas()
+print pandas_df
+```
+which shows
+
+<p align="center">
+<img src="https://github.com/remingtonsexton/BADASS2/blob/master/figures/BADASS_output_partable.png" width="400" />
+</p>
+
