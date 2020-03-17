@@ -13,7 +13,24 @@ All spectral components can be turned off and on via the [Jupyter Notebook](http
 If you use BADASS for any of your fits, I'd be interested to know what you're doing and what version of Python you are using, please let me know via email at remington.sexton-at-email.ucr.edu.
 </b>
 
-* TOC {:toc}
+- [Installation](#installation)
+- [Usage](#usage)
+  * [Fitting Options](#fitting-options)
+  * [Autocorrelation/Convergence Options](#autocorrelation-convergence-options)
+  * [Model Options](#model-options)
+  * [The Main Function](#the-main-function)
+- [Output](#output)
+  * [Best-fit Model](#best-fit-model)
+  * [Parameter Chains, Histograms, Best-fit Values & Uncertainties](#parameter-chains--histograms--best-fit-values---uncertainties)
+  * [Log File](#log-file)
+  * [Best-fit Model Components](#best-fit-model-components)
+  * [Best-fit Parameters & Uncertainties](#best-fit-parameters---uncertainties)
+- [Contributing](#contributing)
+- [Credits](#credits)
+- [License](#license)
+
+<small><i><a href='http://ecotrust-canada.github.io/markdown-toc/'>Table of contents generated with markdown-toc</a></i></small>
+
 
 # Installation
 
