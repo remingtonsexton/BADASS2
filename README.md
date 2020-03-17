@@ -57,7 +57,7 @@ In the Notebook, one need only specify the location of the spectra, the location
 
 **`min_sn_losvd`**: *int*; *Default: 2*; minimum S/N threshold for fitting the LOSVD.  Below this threshold, BADASS does not perform template fitting with pPXF and instead uses a 5.0 Gyr SSP galaxy template as a stand-in for the stellar continuum.
 
-# Autocorrelation/Convergence Options
+## Autocorrelation/Convergence Options
 
 ![](https://github.com/remingtonsexton/BADASS2/blob/master/figures/BADASS_usage_2.png)
 
