@@ -68,7 +68,7 @@ In the Notebook, one need only specify the location of the spectra, the location
 
 1. <img src="https://render.githubusercontent.com/render/math?math=(%5Crm%7BFWHM%7D_%7B%5Crm%7B%5BOIII%5D%2Ccore%7D%7D%2B%5Cdelta%20%5Crm%7BFWHM%7D_%7B%5Crm%7B%5BOIII%5D%2Ccore%7D%7D)%20%3C%20(%5Crm%7BFWHM%7D_%7B%5Crm%7B%5BOIII%5D%2Coutflow%7D%7D-%5Cdelta%20%5Crm%7BFWHM%7D_%7B%5Crm%7B%5BOIII%5D%2Coutflow%7D%7D)">
 2. <img src="https://render.githubusercontent.com/render/math?math=(v_%7B%5Crm%7B%5BOIII%5D%2Ccore%7D%7D-%5Cdelta%20v_%7B%5Crm%7B%5BOIII%5D%2Ccore%7D%7D)%20%3E%20(v_%7B%5Crm%7B%5BOIII%5D%2Coutflow%7D%7D%2B%5Cdelta%20v_%7B%5Crm%7B%5BOIII%5D%2Coutflow%7D%7D)">
-3. <img src="https://render.githubusercontent.com/render/math?math=(A_%7B%5Crm%7B%5BOIII%5D%2Ccore%7D%7D-%5Cdelta%20A_%7B%5Crm%7B%5BOIII%5D%2Ccore%7D%7D)%20%3E%203%5Csigma_%7B%5Crm%7Bnoise%7D%7D"> 
+3. <img src="https://render.githubusercontent.com/render/math?math=(A_%7B%5Crm%7B%5BOIII%5D%2Coutflow%7D%7D-%5Cdelta%20A_%7B%5Crm%7B%5BOIII%5D%2Coutflow%7D%7D)%20%3E%203%5Csigma_%7B%5Crm%7Bnoise%7D%7D"> 
 
 **`mcbs_niter`**: *int*; *Default: 10*; the number of monte carlo bootstrap simulations for outflow testing.  If set to 0, outflows will not be tested for.
 
