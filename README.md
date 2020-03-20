@@ -66,17 +66,20 @@ In the Notebook, one need only specify the location of the spectra, the location
 
 **`good_thresh`**: *float [0.0,1.0]*; *Default: 0.5*; the cutoff for minimum fraction of "good" pixels (determined by SDSS) within the fitting range to allow for fitting of a given spectrum.  If the spectrum has fewer good pixels than this value, BADASS skips over it and moves onto the next spectrum.
 
-**`test_outflows`**: *bool*; *Default: True*; if *False*, BADASS does not test for outflows and instead does whatever you tell it to. if *True*, BADASS performs maximum likelihood fitting of outflows, using monte carlo bootstrap fitting to determine uncertainties, and uses the BADASS prescription for determining the presence of outflows.  If all of the BADASS outflow criteria are satisfied, the final model includes outflow components.  The BADASS outflow criteria to justify the inclusion of outflow components are the following:
+**`test_outflows`**: *bool*; *Default: True*; if *False*, BADASS does not test for outflows and instead does whatever you tell it to. If *True*, BADASS performs maximum likelihood fitting of outflows, using monte carlo bootstrap resampling to determine uncertainties, and uses the BADASS prescription for determining the presence of outflows.  Testing for outflows requires the region from 4400 Å - 5800 Å included in the fitting region to accurately account for possible FeII emission.  This region is also required since [OIII] is used to constrain outflow parameters of the H-alpha/[NII]/[SII] outflows.  If all of the BADASS outflow criteria are satisfied, the final model includes outflow components.  The BADASS outflow criteria to justify the inclusion of outflow components are the following:
 
 1. <img src="https://render.githubusercontent.com/render/math?math=(%5Crm%7BFWHM%7D_%7B%5Crm%7B%5BOIII%5D%2Ccore%7D%7D%2B%5Cdelta%20%5Crm%7BFWHM%7D_%7B%5Crm%7B%5BOIII%5D%2Ccore%7D%7D)%20%3C%20(%5Crm%7BFWHM%7D_%7B%5Crm%7B%5BOIII%5D%2Coutflow%7D%7D-%5Cdelta%20%5Crm%7BFWHM%7D_%7B%5Crm%7B%5BOIII%5D%2Coutflow%7D%7D)">
 2. <img src="https://render.githubusercontent.com/render/math?math=(v_%7B%5Crm%7B%5BOIII%5D%2Ccore%7D%7D-%5Cdelta%20v_%7B%5Crm%7B%5BOIII%5D%2Ccore%7D%7D)%20%3E%20(v_%7B%5Crm%7B%5BOIII%5D%2Coutflow%7D%7D%2B%5Cdelta%20v_%7B%5Crm%7B%5BOIII%5D%2Coutflow%7D%7D)">
 3. <img src="https://render.githubusercontent.com/render/math?math=(A_%7B%5Crm%7B%5BOIII%5D%2Coutflow%7D%7D-%5Cdelta%20A_%7B%5Crm%7B%5BOIII%5D%2Coutflow%7D%7D)%20%3E%203%5Csigma_%7B%5Crm%7Bnoise%7D%7D"> 
 
-**`mcbs_niter`**: *int*; *Default: 10*; the number of monte carlo bootstrap simulations for outflow testing.  If set to 0, outflows will not be tested for.
+**`outflow_test_niter`**: *int*; *Default: 10*; the number of monte carlo bootstrap simulations for outflow testing.  If set to 0, BADASS will not test for outflows.
+
+**`max_like_niter`**: *int*; *Default: 1*; Maximum likelihood fitting of the region defined by `fit_reg`, which can be larger than the region used for outflow testing.  Only one iteration is required, however, more iterations can be performed to obtain better initial parameter values for emcee.  If one elects to only use maximum likelihood fitting (`mcmc_fit=False`), one can perform as many `max_like_niter` iterations to obtain parameter uncertainties in the similar bootstrap method used to test for outflows.
 
 **`min_sn_losvd`**: *int*; *Default: 2*; minimum S/N threshold for fitting the LOSVD.  Below this threshold, BADASS does not perform template fitting with pPXF and instead uses a 5.0 Gyr SSP galaxy template as a stand-in for the stellar continuum.
 
-## Autocorrelation/Convergence Options
+
+## MCMC & Autocorrelation Convergence Options
 
 ![](https://github.com/remingtonsexton/BADASS2/blob/master/figures/BADASS_usage_2.png)
 
