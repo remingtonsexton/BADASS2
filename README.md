@@ -19,7 +19,7 @@ If you use BADASS for any of your fits, I'd be interested to know what you're do
 - [Installation](#installation)
 - [Usage](#usage)
   * [Fitting Options](#fitting-options)
-  * [Autocorrelation/Convergence Options](#autocorrelation-convergence-options)
+  * [MCMC & Autocorrelation Convergence Options](#mcmc---autocorrelation-convergence-options)
   * [Model Options](#model-options)
   * [The Main Function](#the-main-function)
 - [Output](#output)
@@ -28,9 +28,11 @@ If you use BADASS for any of your fits, I'd be interested to know what you're do
   * [Log File](#log-file)
   * [Best-fit Model Components](#best-fit-model-components)
   * [Best-fit Parameters & Uncertainties](#best-fit-parameters---uncertainties)
+  * [Autocorrelation Time & Tolerance History](#autocorrelation-time---tolerance-history)
 - [Contributing](#contributing)
 - [Credits](#credits)
 - [License](#license)
+
 
 # Installation
 
