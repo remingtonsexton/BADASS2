@@ -1,9 +1,8 @@
 #####################################################
 
-# Bayesian AGN Decomposition Analysis for SDSS Spectra (BADASS,version 6.0.1)
+# Bayesian AGN Decomposition Analysis for SDSS Spectra (BADASS,version 6.1.1)
 # by Remington Oliver Sexton
 # contact (email): rsext001@ucr.edu
-# Disclaimer: still in development; use at own risk.
 
 #####################################################
 import numpy as np
@@ -3199,7 +3198,8 @@ def run_emcee(pos,ndim,nwalkers,run_dir,lnprob_args,init_params,param_names,
 
 	# Initialize stuff for autocorrelation analysis
 	if (auto_stop==True):
-		autocorr_chain = []
+		autocorr_times_all = [] # storage array for autocorrelation times
+		autocorr_tols_all  = [] # storage array for autocorrelation tolerances
 		if (isinstance(conv_type,tuple)==True):
 			old_tau = np.full(len(param_names),np.inf)
 		elif (conv_type == 'mean') or (conv_type == 'median') or (conv_type == 'all'):
@@ -3266,10 +3266,10 @@ def run_emcee(pos,ndim,nwalkers,run_dir,lnprob_args,init_params,param_names,
 		if ((k+1) % write_iter == 0) and ((k+1)>=min_iter) and ((k+1)>=write_thresh) and (auto_stop==True):
 			# Autocorrelation analysis of chain to determine convergence; the minimum autocorrelation time is 1.0, which results when a time cannot be accurately calculated.
 			tau = autocorr_convergence(sampler.chain,param_names,plot=False) # Calculate autocorrelation times for each parameter
-			autocorr_chain.append(tau) # 
+			autocorr_times_all.append(tau) # append tau to storage array
 			# Calculate tolerances
 			tol = (np.abs(tau-old_tau)/old_tau) * 100.0
-
+			autocorr_tols_all.append(tol) # append tol to storage array
 			# If convergence for mean autocorrelation time 
 			if (conv_type == 'mean'):
 				par_conv = [] # converged parameter indices
@@ -3482,11 +3482,23 @@ def run_emcee(pos,ndim,nwalkers,run_dir,lnprob_args,init_params,param_names,
 	elap_time = (time.time() - start_time)	   
 	run_time = time_convert(elap_time)
 	print("\n ecmee Runtime = %s. \n" % (run_time))
-	if (auto_stop==True):
-		# Write autocorrelation chain to log 
-		np.save(run_dir+'/log/autocorrelation_chain',autocorr_chain)
 	# Write to log file
 	if (auto_stop==True):
+		# Write autocorrelation chain to log 
+		# np.save(run_dir+'/log/autocorr_times_all',autocorr_times_all)
+		# np.save(run_dir+'/log/autocorr_tols_all',autocorr_tols_all)
+		# Create a dictionary with parameter names as keys, and contains
+		# the autocorrelation times and tolerances for each paramter
+		autocorr_times_all = np.stack(autocorr_times_all,axis=1)
+		autocorr_tols_all  = np.stack(autocorr_tols_all,axis=1)
+		autocorr_dict = {}
+		for k in range(0,len(param_names),1):
+			if (np.shape(autocorr_times_all)[0] > 1):
+				autocorr_dict[param_names[k]] = {'tau':autocorr_times_all[k],
+											 	 'tol':autocorr_tols_all[k]} 
+		np.save(run_dir+'/log/autocorr_dict.npy',autocorr_dict)
+
+
 		if (converged == True):
 			write_log((burn_in,stop_iter,param_names,conv_tau,autocorr_tol,tol,ncor_times),42,run_dir)
 		elif (converged == False):
@@ -3508,9 +3520,11 @@ def run_emcee(pos,ndim,nwalkers,run_dir,lnprob_args,init_params,param_names,
 	# Collect garbage
 	del sampler
 	del lnprob_args
+	del tau
+	del tol
 	gc.collect()
 
-	return a, burn_in #, autocorr
+	return a, burn_in
 
 
 ##################################################################################
@@ -4192,7 +4206,7 @@ def write_log(output_val,output_type,run_dir):
 		# Create log file 
 		logfile = open(run_dir+'log/log_file.txt','a')
 		s = """
-		\n############################### BADASS v6.1.0 LOGFILE ####################################
+		\n############################### BADASS v6.1.1 LOGFILE ####################################
 		"""
 		logfile.write(s)
 		logfile.close()
