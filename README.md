@@ -211,6 +211,25 @@ which shows
 <img src="https://github.com/remingtonsexton/BADASS2/blob/master/figures/BADASS_output_partable.png" width="400" />
 </p>
 
+## Autocorrelation Time & Tolerance History
+
+BADASS will output the full history of parameter autocorrelation times and tolerances for every `write_iter` iterations.  This is done for post-fit analysis to assess how individual parameters behave as MCMC walkers converge on a solution.   Parameter autocorrelation times and tolerances are stored as arrays in a dictionary, which is saved as a numpy `.npy` file named `autocorr_dict.npy', which can be accessed using the `numpy.load()' function: 
+
+```
+autocorr_dict = np.load('autocorr_dict.npy')
+
+# Display parameters in dictionary
+for key in adict.item():
+        print key
+
+# Print the autocorrelation times and tolerances for the 
+# 'na_oiii5007_core_voff' parameter and store them as 
+# "tau" and "tol", respectively:
+tau = autocorr_dict.item().get('na_oiii5007_core_voff').get('tau')
+tol = autocorr_dict.item().get('na_oiii5007_core_voff').get('tol')
+
+```
+
 # Contributing
 
 Please let us know if you wish to contribute to this project by reporting any bugs, issuing pull requests, or requesting any additional features to help make BADASS the most detailed spectroscopic analysis tool in astronomy.
