@@ -221,7 +221,7 @@ BADASS will output the full history of parameter autocorrelation times and toler
 autocorr_dict = np.load('autocorr_dict.npy')
 
 # Display parameters in dictionary
-for key in adict.item():
+for key in autocorr_dict.item():
         print key
 
 # Print the autocorrelation times and tolerances for the 
