@@ -85,7 +85,7 @@ In the Notebook, one need only specify the location of the spectra, the location
 
 ![](https://github.com/remingtonsexton/BADASS2/blob/master/figures/BADASS_usage_2.png)
 
-**`mcmc_fit`**: *bool*; *Default: True*; while it is *highly recommended* one uses MCMC for parameter estimation, we leave it as an option to turn off for faster (but less accurate) maximum likelihood estimation.  If `mcmc_fit=False`, then BADASS performs `max_like_niter` bootstrap iterations to estimate parameter values and uncertainties.  It will then output the best fit values and spectral components is FITS files.
+**`mcmc_fit`**: *bool*; *Default: True*; while it is *highly recommended* one uses MCMC for parameter estimation, we leave it as an option to turn off for faster (but less accurate) maximum likelihood estimation. If `mcmc_fit=False`, then BADASS performs `max_like_niter` bootstrap iterations to estimate parameter values and uncertainties.  It will then output the best fit values and spectral components is FITS files.
 
 **`nwalkers`**: *int*; *Default: 100*; number of "walkers" per parameter used by emcee to explore each parameter space.  The minimum number of walkers is 2 x ( # of parameters), set by emcee.
 
