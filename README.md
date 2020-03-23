@@ -19,7 +19,7 @@ If you use BADASS for any of your fits, I'd be interested to know what you're do
 - [Installation](#installation)
 - [Usage](#usage)
   * [Fitting Options](#fitting-options)
-  * [Autocorrelation/Convergence Options](#autocorrelation-convergence-options)
+  * [MCMC & Autocorrelation Convergence Options](#mcmc--autocorrelation-convergence-options)
   * [Model Options](#model-options)
   * [The Main Function](#the-main-function)
 - [Output](#output)
@@ -27,10 +27,12 @@ If you use BADASS for any of your fits, I'd be interested to know what you're do
   * [Parameter Chains, Histograms, Best-fit Values & Uncertainties](#parameter-chains--histograms--best-fit-values---uncertainties)
   * [Log File](#log-file)
   * [Best-fit Model Components](#best-fit-model-components)
-  * [Best-fit Parameters & Uncertainties](#best-fit-parameters---uncertainties)
+  * [Best-fit Parameters & Uncertainties](#best-fit-parameters--uncertainties)
+  * [Autocorrelation Time & Tolerance History](#autocorrelation-time--tolerance-history)
 - [Contributing](#contributing)
 - [Credits](#credits)
 - [License](#license)
+
 
 # Installation
 
@@ -210,6 +212,25 @@ which shows
 <p align="center">
 <img src="https://github.com/remingtonsexton/BADASS2/blob/master/figures/BADASS_output_partable.png" width="400" />
 </p>
+
+## Autocorrelation Time & Tolerance History
+
+BADASS will output the full history of parameter autocorrelation times and tolerances for every `write_iter` iterations.  This is done for post-fit analysis to assess how individual parameters behave as MCMC walkers converge on a solution.   Parameter autocorrelation times and tolerances are stored as arrays in a dictionary, which is saved as a numpy `.npy` file named `autocorr_dict.npy', which can be accessed using the `numpy.load()' function: 
+
+```
+autocorr_dict = np.load('autocorr_dict.npy')
+
+# Display parameters in dictionary
+for key in autocorr_dict.item():
+        print key
+
+# Print the autocorrelation times and tolerances for the 
+# 'na_oiii5007_core_voff' parameter and store them as 
+# "tau" and "tol", respectively:
+tau = autocorr_dict.item().get('na_oiii5007_core_voff').get('tau')
+tol = autocorr_dict.item().get('na_oiii5007_core_voff').get('tol')
+
+```
 
 # Contributing
 
