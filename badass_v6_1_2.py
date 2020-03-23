@@ -1,6 +1,6 @@
 #####################################################
 
-# Bayesian AGN Decomposition Analysis for SDSS Spectra (BADASS,version 6.1.1)
+# Bayesian AGN Decomposition Analysis for SDSS Spectra (BADASS,version 6.1.2)
 # by Remington Oliver Sexton
 # contact (email): rsext001@ucr.edu
 
@@ -3209,6 +3209,8 @@ def run_emcee(pos,ndim,nwalkers,run_dir,lnprob_args,init_params,param_names,
 		autocorr_tol = autocorr_tol	
 		stop_iter    = max_iter # stopping iteration; changes once convergence is reached
 		converged  = False
+		write_log((min_samp,autocorr_tol,ncor_times,conv_type),41,run_dir)
+
 
 	# Check auto_stop convergence type:
 	if (auto_stop==True) and (isinstance(conv_type,tuple)==True) :
@@ -3233,7 +3235,7 @@ def run_emcee(pos,ndim,nwalkers,run_dir,lnprob_args,init_params,param_names,
 				pass
 			else:
 				raise ValueError('\n One of more paramters in conv_type is not a valid parameter.\n')
-		write_log((min_samp,autocorr_tol,ncor_times,conv_type),41,run_dir)
+		# write_log((min_samp,autocorr_tol,ncor_times,conv_type),41,run_dir)
 	# Run emcee
 	for k, result in enumerate(sampler.sample(pos, iterations=max_iter)):#,storechain=True)):
 		if ((k+1) % write_iter == 0) and ((k+1)>=write_thresh) and ((k+1)<min_iter): 
@@ -4206,7 +4208,7 @@ def write_log(output_val,output_type,run_dir):
 		# Create log file 
 		logfile = open(run_dir+'log/log_file.txt','a')
 		s = """
-		\n############################### BADASS v6.1.1 LOGFILE ####################################
+		\n############################### BADASS v6.1.2 LOGFILE ####################################
 		"""
 		logfile.write(s)
 		logfile.close()
