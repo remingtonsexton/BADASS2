@@ -1,6 +1,6 @@
 #####################################################
 
-# Bayesian AGN Decomposition Analysis for SDSS Spectra (BADASS,version 6.1.2)
+# Bayesian AGN Decomposition Analysis for SDSS Spectra (BADASS,version 6.2.0)
 # by Remington Oliver Sexton
 # contact (email): rsext001@ucr.edu
 
@@ -1016,8 +1016,8 @@ def sdss_prepare(file,fit_reg,temp_dir,run_dir,plot=False):
 	# SDSS spectra are already log10-rebinned
 	loglam_gal = t['loglam'][mask] # This is the observed SDSS wavelength range, NOT the rest wavelength range of the galaxy
 	lam_gal = 10**loglam_gal
-	ivar = t['ivar'][mask]# inverse variance
-	noise = np.sqrt(1.0/ivar)
+	ivar = t['ivar'][mask] # inverse variance
+	noise = np.sqrt(1.0/ivar) # 1-sigma spectral noise
 
 	c = 299792.458                  # speed of light in km/s
 	frac = lam_gal[1]/lam_gal[0]    # Constant lambda fraction per pixel
@@ -1140,15 +1140,15 @@ def sdss_prepare(file,fit_reg,temp_dir,run_dir,plot=False):
 		fig = plt.figure(figsize=(14,6))
 		ax1 = fig.add_subplot(2,1,1)
 		ax2 = fig.add_subplot(2,1,2)
-		ax1.step(lam_gal,galaxy,label='Galaxy',linewidth=0.5)
+		ax1.plot(lam_gal,galaxy,label='Galaxy',linewidth=1.0)
 		# ax1.fill_between(lam_gal,galaxy-noise,galaxy+noise,color='gray',alpha=0.5,linewidth=0.5)
-		ax1.step(lam_gal,noise,label='Error Spectrum',linewidth=0.5,color='gray')
+		ax1.plot(lam_gal,noise,label='Error Spectrum',linewidth=1.0,color='gray')
 		ax1.axhline(0.0,color='white',linewidth=0.5,linestyle='--')
 		ax2.plot(np.exp(loglam_temp),templates[:,:],alpha=0.5,label='Template',linewidth=0.5)
 		ax1.set_xlabel(r'$\lambda_{\rm{rest}}$ ($\mathrm{\AA}$)',fontsize=12)
 		ax2.set_xlabel(r'$\lambda_{\rm{rest}}$ ($\mathrm{\AA}$)',fontsize=12)
-		ax1.set_ylabel(r'$f_\lambda$ (erg cm$^{-2}$ s$^{-1}$ $\mathrm{\AA}^{-1}$)',fontsize=12)
-		ax2.set_ylabel(r'Normalized Flux',fontsize=12)
+		ax1.set_ylabel(r'$f_\lambda$ (10^{-17} erg cm$^{-2}$ s$^{-1}$ $\mathrm{\AA}^{-1}$)',fontsize=10)
+		ax2.set_ylabel(r'Normalized Flux',fontsize=10)
 		ax1.set_xlim(np.min(lam_gal),np.max(lam_gal))
 		ax2.set_xlim(np.min(lam_gal),np.max(lam_gal))
 		ax1.legend(loc='best')
@@ -1865,30 +1865,30 @@ def max_likelihood(param_dict,lam_gal,galaxy,noise,gal_temp,na_feii_temp,br_feii
 							  temp_list,temp_fft,npad,velscale,npix,vsyst,run_dir,
 							  fit_type,output_model)
 	
-		# Compute the total standard deviation at each pixel 
-		# To take into account the uncertainty of the model, we compute the median absolute deviation of
-		# the residuals from the initial fit, and add it in quadrature to the per-pixel standard deviation
-		# of the sdss spectra.
-		model_std = mad_std(comp_dict['residuals']['comp'])
-	
-		sigma = np.sqrt(mad_std(noise)**2 + model_std**2)
+		# Construct random normally-distributed noise
+		# How we do the monte carlo bootstrapping (i.e., the proper way):
+		# (1) The 1-sigma uncertainty (spectral "noise") from inverse variance of the SDSS spectra is 
+		# 	  the pixel-to-pixel variation in the spectrum when rows of pixels are added to form the final 1-d spectrum. 
+		# 	  This is always an underestimate of the true noise in the spectrum. 
+		# (2) The residual noise from a fit, taken to be the median absolute deviation of the residuals from a fit.  This 
+		#     is always greater than the "noise" from (1), but closer to the actual value of the noise across the fitting 
+		#	  region.  
+		#  We add (1) and (2) in quadrature to simulate the noise at /every/ pixel in the fitting region.
 
-		model = comp_dict['model']['comp']
-
+		resid_std = mad_std(comp_dict['residuals']['comp']) # the residual noise
+		mcnoise = np.sqrt(np.array(noise)**2 + (resid_std)**2) # the residual noise and spectral noise added in quadrature
 		mcpars = np.empty((len(par_best), outflow_test_niter)) # stores best-fit parameters of each MC iteration
 
+		# FeII templates if None
 		if (na_feii_temp is None) or (br_feii_temp is None):
 			na_feii_temp = np.full_like(lam_gal,0)
 			br_feii_temp = np.full_like(lam_gal,0)
 
-
 		print( '\n Performing Monte Carlo bootstrapping to determine if outflows are present...')
 		print( '\n       Approximate time for %d iterations: %s \n' % (outflow_test_niter,time_convert(elap_time*outflow_test_niter))  )
 		for n in range(0,outflow_test_niter,1):
-			# Generate an array of random normally distributed data using sigma
-			rand  = np.random.normal(0.0,sigma,len(lam_gal))
-	
-			mcgal = model + rand
+			# Generate a simulated galaxy spectrum with noise added at each pixel
+			mcgal  = np.random.normal(galaxy,mcnoise)
 			fit_type     = 'init'
 			output_model = False
 
@@ -1897,7 +1897,7 @@ def max_likelihood(param_dict,lam_gal,galaxy,noise,gal_temp,na_feii_temp,br_feii
 
 				nll = lambda *args: -lnlike(*args)
 				resultmc = op.minimize(fun = nll, x0 = params, \
-	         				 		 args=(param_names,lam_gal,mcgal,noise,gal_temp,na_feii_temp,br_feii_temp,
+	         				 		 args=(param_names,lam_gal,mcgal,mcnoise,gal_temp,na_feii_temp,br_feii_temp,
 	         				 	   		   temp_list,temp_fft,npad,velscale,npix,vsyst,run_dir,
 	         				 	   		   fit_type,output_model),\
 	         				 		 method='SLSQP', bounds = bounds, constraints=cons1, options={'maxiter':2500,'disp': False})
@@ -1907,7 +1907,7 @@ def max_likelihood(param_dict,lam_gal,galaxy,noise,gal_temp,na_feii_temp,br_feii
 
 				nll = lambda *args: -lnlike(*args)
 				resultmc = op.minimize(fun = nll, x0 = params, \
-	         				 		 args=(param_names,lam_gal,mcgal,noise,gal_temp,na_feii_temp,br_feii_temp,
+	         				 		 args=(param_names,lam_gal,mcgal,mcnoise,gal_temp,na_feii_temp,br_feii_temp,
 	         				 	   		   temp_list,temp_fft,npad,velscale,npix,vsyst,run_dir,
 	         				 	   		   fit_type,output_model),\
 	         				 		 method='SLSQP', bounds = bounds, options={'maxiter':2500,'disp': False})
@@ -1916,7 +1916,7 @@ def max_likelihood(param_dict,lam_gal,galaxy,noise,gal_temp,na_feii_temp,br_feii
 			# For testing: plots every max. likelihood iteration
 			if 0:
 				output_model = True
-				fit_model(resultmc['x'],param_names,lam_gal,mcgal,noise,gal_temp,na_feii_temp,br_feii_temp,
+				fit_model(resultmc['x'],param_names,lam_gal,galaxy,mcnoise,gal_temp,na_feii_temp,br_feii_temp,
 			  			  temp_list,temp_fft,npad,velscale,npix,vsyst,run_dir,
 			  			  fit_type,output_model)
 	
@@ -1931,7 +1931,7 @@ def max_likelihood(param_dict,lam_gal,galaxy,noise,gal_temp,na_feii_temp,br_feii
 		if 1:
 			output_model = True
 			comp_dict = fit_model([pdict[key]['med'] for key in pdict],pdict.keys(),
-					              lam_gal,galaxy,noise,gal_temp,na_feii_temp,br_feii_temp,
+					              lam_gal,galaxy,mcnoise,gal_temp,na_feii_temp,br_feii_temp,
 					              temp_list,temp_fft,npad,velscale,npix,vsyst,run_dir,
 					              fit_type,output_model)
 			fig = plt.figure(figsize=(10,6)) 
@@ -1972,6 +1972,13 @@ def max_likelihood(param_dict,lam_gal,galaxy,noise,gal_temp,na_feii_temp,br_feii
 			fig.clear()
 			plt.close()
 			# Collect garbage
+			del params       
+			del bounds     
+			del result
+			del par_best
+			del mcpars  
+			del mcgal
+			del resultmc
 			del fig
 			del ax1
 			del ax2
@@ -1981,7 +1988,7 @@ def max_likelihood(param_dict,lam_gal,galaxy,noise,gal_temp,na_feii_temp,br_feii
 		# Outflow determination and LOSVD for final model: 
 		# determine if the object has outflows and if stellar velocity dispersion should be fit
 
-		return pdict, sigma
+		return pdict, np.median(mcnoise)
 
 	elif (test_outflows==False):
 
@@ -1993,18 +2000,21 @@ def max_likelihood(param_dict,lam_gal,galaxy,noise,gal_temp,na_feii_temp,br_feii
 							  temp_list,temp_fft,npad,velscale,npix,vsyst,run_dir,
 							  fit_type,output_model)
 	
-		# Compute the total standard deviation at each pixel 
-		# To take into account the uncertainty of the model, we compute the median absolute deviation of
-		# the residuals from the initial fit, and add it in quadrature to the per-pixel standard deviation
-		# of the sdss spectra.
-		model_std = mad_std(comp_dict['residuals']['comp'])
-	
-		sigma = np.sqrt(mad_std(noise)**2 + model_std**2)
+		# Construct random normally-distributed noise
+		# How we do the monte carlo bootstrapping (i.e., the proper way):
+		# (1) The 1-sigma uncertainty (spectral "noise") from inverse variance of the SDSS spectra is 
+		# 	  the pixel-to-pixel variation in the spectrum when rows of pixels are added to form the final 1-d spectrum. 
+		# 	  This is always an underestimate of the true noise in the spectrum. 
+		# (2) The residual noise from a fit, taken to be the median absolute deviation of the residuals from a fit.  This 
+		#     is always greater than the "noise" from (1), but closer to the actual value of the noise across the fitting 
+		#	  region.  
+		#  We add (1) and (2) in quadrature to simulate the noise at /every/ pixel in the fitting region.
 
-		model = comp_dict['model']['comp']
+		resid_std = mad_std(comp_dict['residuals']['comp']) # the residual noise
+		mcnoise = np.sqrt(np.array(noise)**2 + (resid_std)**2) # the residual noise and spectral noise added in quadrature
+		mcpars = np.empty((len(par_best), outflow_test_niter)) # stores best-fit parameters of each MC iteration
 
-		mcpars = np.empty((len(par_best), max_like_niter)) # stores best-fit parameters of each MC iteration
-
+		# FeII templates if None
 		if (na_feii_temp is None) or (br_feii_temp is None):
 			na_feii_temp = np.full_like(lam_gal,0)
 			br_feii_temp = np.full_like(lam_gal,0)
@@ -2012,10 +2022,8 @@ def max_likelihood(param_dict,lam_gal,galaxy,noise,gal_temp,na_feii_temp,br_feii
 		print( '\n Performing Monte Carlo bootstrapping for initial parameter values...')
 		print( '\n       Approximate time for %d iterations: %s \n' % (max_like_niter,time_convert(elap_time*max_like_niter))  )
 		for n in range(0,max_like_niter,1):
-			# Generate an array of random normally distributed data using sigma
-			rand  = np.random.normal(0.0,sigma,len(lam_gal))
-	
-			mcgal = model + rand
+			# Generate a simulated galaxy spectrum with noise added at each pixel
+			mcgal  = np.random.normal(galaxy,mcnoise)
 			fit_type     = 'init'
 			output_model = False
 
@@ -2023,7 +2031,7 @@ def max_likelihood(param_dict,lam_gal,galaxy,noise,gal_temp,na_feii_temp,br_feii
 
 				nll = lambda *args: -lnlike(*args)
 				resultmc = op.minimize(fun = nll, x0 = params, \
-	         				 		 args=(param_names,lam_gal,mcgal,noise,gal_temp,na_feii_temp,br_feii_temp,
+	         				 		 args=(param_names,lam_gal,mcgal,mcnoise,gal_temp,na_feii_temp,br_feii_temp,
 	         				 	   		   temp_list,temp_fft,npad,velscale,npix,vsyst,run_dir,
 	         				 	   		   fit_type,output_model),\
 	         				 		 method='SLSQP', bounds = bounds, constraints=cons, options={'maxiter':2500,'disp': False})
@@ -2032,7 +2040,7 @@ def max_likelihood(param_dict,lam_gal,galaxy,noise,gal_temp,na_feii_temp,br_feii
 
 				nll = lambda *args: -lnlike(*args)
 				resultmc = op.minimize(fun = nll, x0 = params, \
-	         				 		 args=(param_names,lam_gal,mcgal,noise,gal_temp,na_feii_temp,br_feii_temp,
+	         				 		 args=(param_names,lam_gal,mcgal,mcnoise,gal_temp,na_feii_temp,br_feii_temp,
 	         				 	   		   temp_list,temp_fft,npad,velscale,npix,vsyst,run_dir,
 	         				 	   		   fit_type,output_model),\
 	         				 		 method='SLSQP', bounds = bounds, options={'maxiter':2500,'disp': False})
@@ -2096,6 +2104,13 @@ def max_likelihood(param_dict,lam_gal,galaxy,noise,gal_temp,na_feii_temp,br_feii
 			fig.clear()
 			plt.close()
 			# Collect garbage
+			del params       
+			del bounds     
+			del result
+			del par_best
+			del mcpars  
+			del mcgal
+			del resultmc
 			del fig
 			del ax1
 			del ax2
@@ -4208,7 +4223,7 @@ def write_log(output_val,output_type,run_dir):
 		# Create log file 
 		logfile = open(run_dir+'log/log_file.txt','a')
 		s = """
-		\n############################### BADASS v6.1.2 LOGFILE ####################################
+		\n############################### BADASS v6.2.0 LOGFILE ####################################
 		"""
 		logfile.write(s)
 		logfile.close()
