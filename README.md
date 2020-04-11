@@ -18,7 +18,7 @@ If you use BADASS for any of your fits, I'd be interested to know what you're do
 - [Installation](#installation)
 - [Usage](#usage)
   * [Fitting Options](#fitting-options)
-- [MCMC, Autocorrelation, and Convergence Options](#mcmc--autocorrelation--and-convergence-options)
+- [MCMC and Autocorrelation Convergence Options](#mcmc-and-autocorrelation-convergence-options)
   * [Model Options](#model-options)
   * [Plotting and Output Options](#plotting-and-output-options)
   * [Multiprocessing Options](#multiprocessing-options)
@@ -110,7 +110,7 @@ Maximum likelihood fitting of the region defined by `fit_reg`, which can be larg
 **`min_sn_losvd`**: *int*; *Default: 10*  
 minimum S/N threshold for fitting the LOSVD.  Below this threshold, BADASS does not perform template fitting with pPXF and instead uses a 5.0 Gyr SSP galaxy template as a stand-in for the stellar continuum.
 
-# MCMC, Autocorrelation, and Convergence Options
+# MCMC and Autocorrelation Convergence Options
 
 ```python
 ######################### MCMC algorithm parameters ############################
