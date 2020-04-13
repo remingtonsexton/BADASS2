@@ -38,7 +38,7 @@ If you use BADASS for any of your fits, I'd be interested to know what you're do
 
 The easiest way to get started is to simply clone the repository. 
 
-As of BADASS v7.0.0, the following packages are required (Python 2.7):
+As of BADASS v7.1.0, the following packages are required (Python 2.7):
 - `numpy 1.11.3`
 - `scipy 1.1.0`
 - `pandas 0.23.4`
