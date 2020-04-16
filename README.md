@@ -397,9 +397,22 @@ print pandas_df
 ```
 which shows
 
-<p align="center">
-<img src="https://github.com/remingtonsexton/BADASS2/blob/master/figures/BADASS_output_partable.png" width="400" />
-</p>
+|    |             parameter |     best_fit  |   sigma_low  |   sigma_upp  | flag  |
+| ---| --------------------- | -------------:| -----------: | -----------: | ----: |
+| 0  |      host_galaxy_flux |  43179.789062 |  2146.635986 |  2523.700439 |   0.0 |
+| 1  |       host_galaxy_lum |      2.993121 |     0.148800 |     0.174937 |   0.0 |
+| 2  |        na_Ha_core_amp |    458.180511 |     2.664992 |     2.122619 |   0.0 |
+| 3  |       na_Ha_core_flux |   2304.035889 |    13.468710 |    19.964769 |   0.0 |
+| .  |            .          |  	 .	     |		 .	    |		 .     |	.  |
+| .  |            .          |  	 .	     |		 .	    |		 .     |	.  |
+| .  |            .          |  	 .	     |		 .	    |		 .     |	.  |
+| 57 |             power_amp |     13.716220 |     0.670133 |     0.736425 |   0.0 |
+| 58 |            power_flux |  47760.011719 |  2512.798340 |  2167.185303 |   0.0 |
+| 59 |             power_lum |      3.310611 |     0.174181 |     0.150224 |   0.0 |
+| 60 |           power_slope |     -0.705488 |     0.294422 |     0.352110 |   0.0 |
+| 61 |             stel_disp |     99.216248 |     1.282358 |     0.785158 |   0.0 |
+| 62 |              stel_vel |     97.768555 |     3.329233 |     2.168582 |   0.0 |
+| 63 |                z_best |      0.055001 |     0.000012 |     0.000008 |   0.0 | 
 
 ## Autocorrelation Time and Tolerance History
 
