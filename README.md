@@ -364,9 +364,25 @@ print(tbdata.columns)
 ```
 which shows
 
-<p align="center">
-<img src="https://github.com/remingtonsexton/BADASS2/blob/master/figures/BADASS_output_bestfit_comp.png" width="400" />
-</p>
+```
+ColDefs(
+    name = 'na_oiii4959_core'; format = 'E'
+    name = 'br_Hb'; format = 'E'
+    name = 'power'; format = 'E'
+    name = 'na_Hb_outflow'; format = 'E'
+    name = 'na_oiii5007_core'; format = 'E'
+    name = 'na_Hb_core'; format = 'E'
+    name = 'wave'; format = 'E'
+    name = 'na_feii_template'; format = 'E'
+    name = 'na_oiii4959_outflow'; format = 'E'
+    name = 'noise'; format = 'E'
+    name = 'resid'; format = 'E'
+    name = 'host_galaxy'; format = 'E'
+    name = 'na_oiii5007_outflow'; format = 'E'
+    name = 'data'; format = 'E'
+    name = 'model'; format = 'E'
+)
+```
 
 ## Best-fit Parameters and Uncertainties 
 
