@@ -9,7 +9,7 @@ BADASS is an open-source spectral analysis tool designed for detailed decomposit
 - AGN power-law continuum. 
 - "Blue-wing" outflow emission components found in narrow-line emission. 
 
-All spectral components can be turned off and on via the [Jupyter Notebook](https://jupyter.org/) interface, from which all fitting options can be easily changed to fit non-AGN-host galaxies (or even stars!).  The code was originally written in Python 2, but is now fully compatible with Python 3.  BADASS was originally written to fit Keck Low-Resolution Imaging Spectrometer (LRIS) data ([Sexton et al. (2019)](https://ui.adsabs.harvard.edu/abs/2019ApJ...878..101S/abstract)), but because BADASS is open-source and *not* written in an expensive proprietary language, one can easily contribute to or modify the code to fit data from other instruments.  
+All spectral components can be turned off and on via the [Jupyter Notebook](https://jupyter.org/) interface, from which all fitting options can be easily changed to fit non-AGN-host galaxies (or even stars!).  BADASS uses multiprocessing to fit multiple spectra simultaneously depending on your hardware configuration.  The code was originally written in Python 2.7 to fit Keck Low-Resolution Imaging Spectrometer (LRIS) data ([Sexton et al. (2019)](https://ui.adsabs.harvard.edu/abs/2019ApJ...878..101S/abstract)), but because BADASS is open-source and *not* written in an expensive proprietary language, one can easily contribute to or modify the code to fit data from other instruments.  
 
 <b>  
 If you use BADASS for any of your fits, I'd be interested to know what you're doing and what version of Python you are using, please let me know via email at remington.sexton-at-email.ucr.edu.
@@ -18,18 +18,19 @@ If you use BADASS for any of your fits, I'd be interested to know what you're do
 - [Installation](#installation)
 - [Usage](#usage)
   * [Fitting Options](#fitting-options)
-- [MCMC and Autocorrelation Convergence Options](#mcmc-and-autocorrelation-convergence-options)
+- [MCMC & Autocorrelation/Convergence Options](#mcmc---autocorrelation-convergence-options)
   * [Model Options](#model-options)
-  * [Plotting and Output Options](#plotting-and-output-options)
+  * [Outflow Testing Options](#outflow-testing-options)
+  * [Plotting & Output Options](#plotting---output-options)
   * [Multiprocessing Options](#multiprocessing-options)
   * [The Main Function](#the-main-function)
 - [Output](#output)
   * [Best-fit Model](#best-fit-model)
-  * [Parameter Chains, Histograms, Best-fit Values and Uncertainties](#parameter-chains--histograms--best-fit-values-and-uncertainties)
+  * [Parameter Chains, Histograms, Best-fit Values & Uncertainties](#parameter-chains--histograms--best-fit-values---uncertainties)
   * [Log File](#log-file)
   * [Best-fit Model Components](#best-fit-model-components)
-  * [Best-fit Parameters and Uncertainties](#best-fit-parameters-and-uncertainties)
-  * [Autocorrelation Time and Tolerance History](#autocorrelation-time-and-tolerance-history)
+  * [Best-fit Parameters & Uncertainties](#best-fit-parameters---uncertainties)
+  * [Autocorrelation Time & Tolerance History](#autocorrelation-time---tolerance-history)
 - [Contributing](#contributing)
 - [Credits](#credits)
 - [License](#license)
@@ -38,9 +39,9 @@ If you use BADASS for any of your fits, I'd be interested to know what you're do
 
 The easiest way to get started is to simply clone the repository. 
 
-As of BADASS v7.1.0, the following packages are required (Python 2.7):
-- `numpy 1.11.3`
-- `scipy 1.1.0`
+As of BADASS v7.3.0, the following packages are required (Python 2.7):
+- `numpy 1.16.6`
+- `scipy 1.2.1`
 - `pandas 0.23.4`
 - `matplotlib 2.2.3`
 - `astropy 2.0.9`
@@ -48,8 +49,8 @@ As of BADASS v7.1.0, the following packages are required (Python 2.7):
 - `emcee 2.2.1`
 - `natsort 5.5.0`
 - `corner 2.2.0`
-
-BADASS has been tested successfully on Python 3. 
+- `multiprocessing 0.70a1`
+- `psutil 5.6.7`
 
 The code is run entirely through the Jupyter Notebook interface, and is set up to run on the included SDSS spectrum file in the ".../examples/" folder.  If one wants to fit multiple spectra consecutively, simply add folders for each spectrum to the folder.  This is the recommended directory structure:
 
@@ -84,7 +85,7 @@ outflow_test_niter = 10 # number of monte carlo iterations for outflows
 # Maximum Likelihood Fitting for Final Model Parameters
 max_like_niter = 10 # number of maximum likelihood iterations
 # LOSVD parameters
-min_sn_losvd  = 10  # minimum S/N threshold for fitting the LOSVD
+min_sn_losvd  = 20  # minimum S/N threshold for fitting the LOSVD
 ################################################################################
 ```
 
@@ -97,9 +98,11 @@ the cutoff for minimum fraction of "good" pixels (determined by SDSS) within the
 **`test_outflows`**: *bool*; *Default: True*  
 if *False*, BADASS does not test for outflows and instead does whatever you tell it to. If *True*, BADASS performs maximum likelihood fitting of outflows, using monte carlo bootstrap resampling to determine uncertainties, and uses the BADASS prescription for determining the presence of outflows.  Testing for outflows requires the region from 4400 Å - 5800 Å included in the fitting region to accurately account for possible FeII emission.  This region is also required since [OIII] is used to constrain outflow parameters of the H-alpha/[NII]/[SII] outflows.  If all of the BADASS outflow criteria are satisfied, the final model includes outflow components.  The BADASS outflow criteria to justify the inclusion of outflow components are the following:
 
-1. <img src="https://render.githubusercontent.com/render/math?math=(%5Crm%7BFWHM%7D_%7B%5Crm%7B%5BOIII%5D%2Ccore%7D%7D%2B%5Cdelta%20%5Crm%7BFWHM%7D_%7B%5Crm%7B%5BOIII%5D%2Ccore%7D%7D)%20%3C%20(%5Crm%7BFWHM%7D_%7B%5Crm%7B%5BOIII%5D%2Coutflow%7D%7D-%5Cdelta%20%5Crm%7BFWHM%7D_%7B%5Crm%7B%5BOIII%5D%2Coutflow%7D%7D)">
-2. <img src="https://render.githubusercontent.com/render/math?math=(v_%7B%5Crm%7B%5BOIII%5D%2Ccore%7D%7D-%5Cdelta%20v_%7B%5Crm%7B%5BOIII%5D%2Ccore%7D%7D)%20%3E%20(v_%7B%5Crm%7B%5BOIII%5D%2Coutflow%7D%7D%2B%5Cdelta%20v_%7B%5Crm%7B%5BOIII%5D%2Coutflow%7D%7D)">
-3. <img src="https://render.githubusercontent.com/render/math?math=(A_%7B%5Crm%7B%5BOIII%5D%2Coutflow%7D%7D-%5Cdelta%20A_%7B%5Crm%7B%5BOIII%5D%2Coutflow%7D%7D)%20%3E%203%5Csigma_%7B%5Crm%7Bnoise%7D%7D"> 
+1. <img src="https://render.githubusercontent.com/render/math?math=(A_%7B%5Crm%7B%5BOIII%5D%2Coutflow%7D%7D-%5Cdelta%20A_%7B%5Crm%7B%5BOIII%5D%2Coutflow%7D%7D)%20%3E%203%5Csigma_%7B%5Crm%7Bnoise%7D%7D"> 
+2. <img src="https://render.githubusercontent.com/render/math?math=(%5Crm%7BFWHM%7D_%7B%5Crm%7B%5BOIII%5D%2Ccore%7D%7D%2B%5Cdelta%20%5Crm%7BFWHM%7D_%7B%5Crm%7B%5BOIII%5D%2Ccore%7D%7D)%20%3C%20(%5Crm%7BFWHM%7D_%7B%5Crm%7B%5BOIII%5D%2Coutflow%7D%7D-%5Cdelta%20%5Crm%7BFWHM%7D_%7B%5Crm%7B%5BOIII%5D%2Coutflow%7D%7D)">
+3. <img src="https://render.githubusercontent.com/render/math?math=(v_%7B%5Crm%7B%5BOIII%5D%2Ccore%7D%7D-%5Cdelta%20v_%7B%5Crm%7B%5BOIII%5D%2Ccore%7D%7D)%20%3E%20(v_%7B%5Crm%7B%5BOIII%5D%2Coutflow%7D%7D%2B%5Cdelta%20v_%7B%5Crm%7B%5BOIII%5D%2Coutflow%7D%7D)">
+4. Significant improvement in residuals between the single-component and double-component models at [OIII]5007
+5. Fit parameters within allowed limits.
 
 **`outflow_test_niter`**: *int*; *Default: 10*  
 the number of monte carlo bootstrap simulations for outflow testing.  If set to 0, BADASS will not test for outflows.
@@ -110,7 +113,7 @@ Maximum likelihood fitting of the region defined by `fit_reg`, which can be larg
 **`min_sn_losvd`**: *int*; *Default: 10*  
 minimum S/N threshold for fitting the LOSVD.  Below this threshold, BADASS does not perform template fitting with pPXF and instead uses a 5.0 Gyr SSP galaxy template as a stand-in for the stellar continuum.
 
-# MCMC and Autocorrelation Convergence Options
+# MCMC & Autocorrelation/Convergence Options
 
 ```python
 ######################### MCMC algorithm parameters ############################
@@ -123,9 +126,9 @@ ncor_times    = 10.0  # number of autocorrelation times for convergence
 autocorr_tol  = 10.0  # percent tolerance between checking autocorr. times
 write_iter    = 100   # write/check autocorrelation times interval
 write_thresh  = 100   # when to start writing/checking parameters
-burn_in       = 47500 # burn-in if max_iter is reached
+burn_in       = 17500 # burn-in if max_iter is reached
 min_iter      = 100   # min number of iterations before stopping
-max_iter      = 50000 # max number of MCMC iterations
+max_iter      = 20000 # max number of MCMC iterations
 ################################################################################
 ```
 
@@ -210,7 +213,31 @@ Examples of the aforementioned spectral components can be seen in the example fi
 
 ![](https://github.com/remingtonsexton/BADASS2/blob/master/figures/BADASS_model_options.png)
 
-## Plotting and Output Options
+## Outflow Testing Options
+
+```python
+############################# Outflow Test options #############################
+# Here one can choose how outflows are fit and tested for 
+# Amp. test   : outflow amp. must be N-sigma greater than noise
+# FWHM test   : outflow must have greater FWHM than core comp by N-sigma
+# VOFF test   : outflow must have a larger offset than core relative to rest;
+#               picks out only blueshifted outflows by N-sigma
+# Resid. test : there must be a measurable difference in residuals by N-sigma
+# Bounds. test: if paramters of fit reach bounds by N-sigma, 
+#               consider it a bad fit.
+outflow_test_pars={
+'amp_test':{'test':True,'nsigma':1.0}, # Amplitude-over-noise by n-sigma
+'fwhm_test':{'test':True,'nsigma':1.0}, # FWHM difference by n-sigma
+'voff_test':{'test':False,'nsigma':1.0}, # blueshift voff from core by n-sigma
+'resid_test':{'test':True,'nsigma':1.0}, # residual difference by n-sigma
+'bounds_test':{'test':True,'nsigma':1.0} # within bounds by n-sigma
+}
+################################################################################
+```
+
+*Note*: we turn the `voff_test` option off by default to allow for a range of blueshifted to redshifted outflow components.  If turned on, this test will only select blueshifted outflow components.
+
+## Plotting & Output Options
 
 ```python
 plot_param_hist = True  # Plot MCMC histograms and chains for each parameter
@@ -303,6 +330,7 @@ All of the above options are fed into the `run_BADASS()` function as such:
                       fit_narrow=fit_narrow, 
                       fit_outflows=fit_outflows, 
                       tie_narrow=tie_narrow,
+                      outflow_test_pars=outflow_test_pars,
                       plot_param_hist=plot_param_hist, 
                       plot_flux_hist=plot_flux_hist, 
                       plot_lum_hist=plot_lum_hist,
@@ -323,7 +351,7 @@ This is simply a figure that shows the data, model, residuals, and best-fit comp
 
 ![](https://github.com/remingtonsexton/BADASS2/blob/master/figures/BADASS_output_bestfit.png)
 
-## Parameter Chains, Histograms, Best-fit Values and Uncertainties
+## Parameter Chains, Histograms, Best-fit Values & Uncertainties
 
 For every parameter that is fit, BADASS outputs a figure to visualize the full parameter chain and all walkers, the burn-in, and the final posterior histogram with the best-fit values and uncertainties.  The purpose of these is for visual inspection of the parameter chain to observe its behavior during the fitting process, to get a sense of how well initial parameters were fit, and how walkers behave as the fit progresses.
 
@@ -384,7 +412,7 @@ ColDefs(
 )
 ```
 
-## Best-fit Parameters and Uncertainties 
+## Best-fit Parameters & Uncertainties 
 
 All best-fit parameter values and their upper and lower 1-sigma uncertainties are stored in `par_table.fits` files so they can be more quickly accessed than from a text file.  These are most easily accessed using the (`astropy.table`](https://docs.astropy.org/en/stable/table/pandas.html) module, which can convert a FITS table into a Pandas [DataFrame](https://pandas.pydata.org/pandas-docs/stable/reference/api/pandas.DataFrame.html):
 
@@ -414,7 +442,7 @@ which shows
 | 62 |              stel_vel |     97.768555 |     3.329233 |     2.168582 |   0.0 |
 | 63 |                z_best |      0.055001 |     0.000012 |     0.000008 |   0.0 | 
 
-## Autocorrelation Time and Tolerance History
+## Autocorrelation Time & Tolerance History
 
 BADASS will output the full history of parameter autocorrelation times and tolerances for every `write_iter` iterations.  This is done for post-fit analysis to assess how individual parameters behave as MCMC walkers converge on a solution.   Parameter autocorrelation times and tolerances are stored as arrays in a dictionary, which is saved as a numpy `.npy` file named `autocorr_dict.npy', which can be accessed using the `numpy.load()' function: 
 
@@ -468,3 +496,4 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
