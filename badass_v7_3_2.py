@@ -54,7 +54,7 @@ __author__ = "Remington O. Sexton (UCR), William Matzko (GMU), Nicholas Darden (
 __copyright__ = "Copyright (c) 2020 Remington Oliver Sexton"
 __credits__ = ["Remington O. Sexton (UCR)", "William Matzko (GMU)", "Nicholas Darden (UCR)"]
 __license__ = "MIT"
-__version__ = "7.2.0"
+__version__ = "7.3.2"
 __maintainer__ = "Remington O. Sexton"
 __email__ = "remington.sexton@email.ucr.edu"
 __status__ = "Release"
@@ -118,6 +118,9 @@ __status__ = "Release"
 # - Better outflow testing; test now compare outflow to no-outflow models
 # to check if there is significant improvement in residuals, as well as flags
 # models in which the bounds are reached and good fits cannot be determined.
+
+# Version 7.3.1-7.3.2
+# bug fixes.
 ##################################################################################
 
 #### Check Arguments #############################################################
@@ -3907,8 +3910,7 @@ def lnprior(params,param_names,bounds):
 		# (core_voff >= outflow_voff)
 		if np.all((params >= lower_lim) & (params <= upper_lim)) & \
 			(pdict['na_oiii5007_core_amp']['p'] >= pdict['na_oiii5007_outflow_amp']['p']) & \
-			(pdict['na_oiii5007_outflow_fwhm']['p'] >= pdict['na_oiii5007_core_fwhm']['p']) & \
-			(pdict['na_oiii5007_core_voff']['p'] >= pdict['na_oiii5007_outflow_voff']['p']):
+			(pdict['na_oiii5007_outflow_fwhm']['p'] >= pdict['na_oiii5007_core_fwhm']['p']):
 			return 0.0
 		else: return -np.inf
 	#
@@ -3928,7 +3930,6 @@ def lnprior(params,param_names,bounds):
 		if np.all((params >= lower_lim) & (params <= upper_lim)) & \
 			(pdict['na_oiii5007_core_amp']['p'] >= pdict['na_oiii5007_outflow_amp']['p']) & \
 			(pdict['na_oiii5007_outflow_fwhm']['p'] >= pdict['na_oiii5007_core_fwhm']['p']) & \
-			(pdict['na_oiii5007_core_voff']['p'] >= pdict['na_oiii5007_outflow_voff']['p']) & \
 			(pdict['br_Hb_fwhm']['p'] >= pdict['na_oiii5007_core_fwhm']['p']):
 			return 0.0
 		else: return -np.inf
@@ -3947,8 +3948,7 @@ def lnprior(params,param_names,bounds):
 		# (core_voff >= outflow_voff)
 		if np.all((params >= lower_lim) & (params <= upper_lim)) & \
 			(pdict['na_Ha_core_amp']['p'] >= pdict['na_Ha_outflow_amp']['p']) & \
-			(pdict['na_Ha_outflow_fwhm']['p'] >= pdict['na_Ha_core_fwhm']['p']) & \
-			(pdict['na_Ha_core_voff']['p'] >= pdict['na_Ha_outflow_voff']['p']):
+			(pdict['na_Ha_outflow_fwhm']['p'] >= pdict['na_Ha_core_fwhm']['p']):
 			return 0.0
 		else: return -np.inf
 		
@@ -3969,7 +3969,6 @@ def lnprior(params,param_names,bounds):
 		if np.all((params >= lower_lim) & (params <= upper_lim)) & \
 			(pdict['na_Ha_core_amp']['p'] >= pdict['na_Ha_outflow_amp']['p']) & \
 			(pdict['na_Ha_outflow_fwhm']['p'] >= pdict['na_Ha_core_fwhm']['p']) & \
-			(pdict['na_Ha_core_voff']['p'] >= pdict['na_Ha_outflow_voff']['p']) & \
 			(pdict['br_Ha_fwhm']['p'] >= pdict['na_Ha_core_fwhm']['p']):
 			return 0.0
 		else: return -np.inf
@@ -3991,8 +3990,7 @@ def lnprior(params,param_names,bounds):
 		# (core_voff >= outflow_voff)
 		if np.all((params >= lower_lim) & (params <= upper_lim)) & \
 			(pdict['na_oiii5007_core_amp']['p'] >= pdict['na_oiii5007_outflow_amp']['p']) & \
-			(pdict['na_oiii5007_outflow_fwhm']['p'] >= pdict['na_oiii5007_core_fwhm']['p']) & \
-			(pdict['na_oiii5007_core_voff']['p'] >= pdict['na_oiii5007_outflow_voff']['p']):
+			(pdict['na_oiii5007_outflow_fwhm']['p'] >= pdict['na_oiii5007_core_fwhm']['p']):
 			return 0.0
 		else: return -np.inf
 		
@@ -4015,7 +4013,6 @@ def lnprior(params,param_names,bounds):
 			if np.all((params >= lower_lim) & (params <= upper_lim)) & \
 				(pdict['na_oiii5007_core_amp']['p'] >= pdict['na_oiii5007_outflow_amp']['p']) & \
 				(pdict['na_oiii5007_outflow_fwhm']['p'] >= pdict['na_oiii5007_core_fwhm']['p']) & \
-				(pdict['na_oiii5007_core_voff']['p'] >= pdict['na_oiii5007_outflow_voff']['p']) & \
 				(pdict['br_Hb_fwhm']['p'] >= pdict['na_oiii5007_core_fwhm']['p']) & \
 				(pdict['br_Ha_fwhm']['p'] >= pdict['na_Ha_core_fwhm']['p']):
 				return 0.0
@@ -4024,7 +4021,6 @@ def lnprior(params,param_names,bounds):
 			if np.all((params >= lower_lim) & (params <= upper_lim)) & \
 				(pdict['na_oiii5007_core_amp']['p'] >= pdict['na_oiii5007_outflow_amp']['p']) & \
 				(pdict['na_oiii5007_outflow_fwhm']['p'] >= pdict['na_oiii5007_core_fwhm']['p']) & \
-				(pdict['na_oiii5007_core_voff']['p'] >= pdict['na_oiii5007_outflow_voff']['p']) & \
 				(pdict['br_Hb_fwhm']['p'] >= pdict['na_oiii5007_core_fwhm']['p']) & \
 				(pdict['br_Ha_fwhm']['p'] >= pdict['na_oiii5007_core_fwhm']['p']):
 				return 0.0
@@ -6341,7 +6337,7 @@ def write_log(output_val,output_type,run_dir):
 		os.mkdir(run_dir+'/log/')
 		# Create log file 
 		logfile = open(run_dir+'log/log_file.txt','a')
-		logfile.write('\n############################### BADASS v7.3.0 LOGFILE ####################################\n')
+		logfile.write('\n############################### BADASS v7.3.2 LOGFILE ####################################\n')
 		logfile.close()
 
 
