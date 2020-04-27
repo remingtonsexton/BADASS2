@@ -17,8 +17,9 @@ If you use BADASS for any of your fits, I'd be interested to know what you're do
 
 - [Installation](#installation)
 - [Usage](#usage)
+  * [Known Issues](#known-issues)
   * [Fitting Options](#fitting-options)
-- [MCMC & Autocorrelation/Convergence Options](#mcmc---autocorrelation-convergence-options)
+  * [MCMC & Autocorrelation/Convergence Options](#mcmc---autocorrelation-convergence-options)
   * [Model Options](#model-options)
   * [Outflow Testing Options](#outflow-testing-options)
   * [Plotting & Output Options](#plotting---output-options)
