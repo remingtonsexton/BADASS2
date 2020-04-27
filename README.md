@@ -113,7 +113,7 @@ Maximum likelihood fitting of the region defined by `fit_reg`, which can be larg
 **`min_sn_losvd`**: *int*; *Default: 10*  
 minimum S/N threshold for fitting the LOSVD.  Below this threshold, BADASS does not perform template fitting with pPXF and instead uses a 5.0 Gyr SSP galaxy template as a stand-in for the stellar continuum.
 
-# MCMC & Autocorrelation/Convergence Options
+## MCMC & Autocorrelation/Convergence Options
 
 ```python
 ######################### MCMC algorithm parameters ############################
