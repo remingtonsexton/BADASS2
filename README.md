@@ -17,8 +17,9 @@ If you use BADASS for any of your fits, I'd be interested to know what you're do
 
 - [Installation](#installation)
 - [Usage](#usage)
+  * [Known Issues](#known-issues)
   * [Fitting Options](#fitting-options)
-- [MCMC & Autocorrelation/Convergence Options](#mcmc---autocorrelation-convergence-options)
+  * [MCMC & Autocorrelation/Convergence Options](#mcmc---autocorrelation-convergence-options)
   * [Model Options](#model-options)
   * [Outflow Testing Options](#outflow-testing-options)
   * [Plotting & Output Options](#plotting---output-options)
@@ -72,6 +73,10 @@ spec_loc = natsort.natsorted( glob.glob(spec_dir+'*') )
 
 # Usage
 
+## Known Issues
+
+While the current version of BADASS supports multiprocessing for fitting multiple spectra simultaneously, there is an issue where processes are sharing variables, namely when the user chooses to provide a parameter list for autocorrelation convergence.  If a parameter is removed from the list during the fitting process (for instance, outflow criteria aren't met or S/N criteria not met for fitting LOSVD), emcee will not remove it from the original list when its supposed to, triggering a ValueError warning when it cannot find the paramter to calculate its autocorrelation time.  This is resolved if one simply does not use the list option for `conv_type`, however we are trying to solve this issue at the moment.
+
 ## Fitting Options
  
 ```python 
@@ -113,7 +118,7 @@ Maximum likelihood fitting of the region defined by `fit_reg`, which can be larg
 **`min_sn_losvd`**: *int*; *Default: 10*  
 minimum S/N threshold for fitting the LOSVD.  Below this threshold, BADASS does not perform template fitting with pPXF and instead uses a 5.0 Gyr SSP galaxy template as a stand-in for the stellar continuum.
 
-# MCMC & Autocorrelation/Convergence Options
+## MCMC & Autocorrelation/Convergence Options
 
 ```python
 ######################### MCMC algorithm parameters ############################
