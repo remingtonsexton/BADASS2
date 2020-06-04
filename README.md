@@ -15,6 +15,7 @@ All spectral components can be turned off and on via the [Jupyter Notebook](http
 If you use BADASS for any of your fits, I'd be interested to know what you're doing and what version of Python you are using, please let me know via email at remington.sexton-at-email.ucr.edu.
 </b>
 
+
 - [Installation](#installation)
 - [Usage](#usage)
   * [Fitting Options](#fitting-options)
