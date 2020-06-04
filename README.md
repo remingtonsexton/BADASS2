@@ -9,7 +9,7 @@ BADASS is an open-source spectral analysis tool designed for detailed decomposit
 - AGN power-law continuum. 
 - "Blue-wing" outflow emission components found in narrow-line emission. 
 
-All spectral components can be turned off and on via the [Jupyter Notebook](https://jupyter.org/) interface, from which all fitting options can be easily changed to fit non-AGN-host galaxies (or even stars!).  BADASS uses multiprocessing to fit multiple spectra simultaneously depending on your hardware configuration.  The code was originally written in Python 2.7 to fit Keck Low-Resolution Imaging Spectrometer (LRIS) data ([Sexton et al. (2019)](https://ui.adsabs.harvard.edu/abs/2019ApJ...878..101S/abstract)), but because BADASS is open-source and *not* written in an expensive proprietary language, one can easily contribute to or modify the code to fit data from other instruments.  
+All spectral components can be turned off and on via the [Jupyter Notebook](https://jupyter.org/) interface, from which all fitting options can be easily changed to fit non-AGN-host galaxies (or even stars!).  BADASS uses multiprocessing to fit multiple spectra simultaneously depending on your hardware configuration.  The code was originally written in Python 2.7 to fit Keck Low-Resolution Imaging Spectrometer (LRIS) data ([Sexton et al. (2019)](https://ui.adsabs.harvard.edu/abs/2019ApJ...878..101S/abstract)), but because BADASS is open-source and *not* written in an expensive proprietary language, one can easily contribute to or modify the code to fit data from other instruments.  BADASS is now available for Python 3 [here](https://github.com/remingtonsexton/BADASS3).
 
 <b>  
 If you use BADASS for any of your fits, I'd be interested to know what you're doing and what version of Python you are using, please let me know via email at remington.sexton-at-email.ucr.edu.
@@ -18,7 +18,7 @@ If you use BADASS for any of your fits, I'd be interested to know what you're do
 - [Installation](#installation)
 - [Usage](#usage)
   * [Fitting Options](#fitting-options)
-  * [MCMC & Autocorrelation/Convergence Options](#mcmc---autocorrelation-convergence-options)
+- [MCMC & Autocorrelation/Convergence Options](#mcmc---autocorrelation-convergence-options)
   * [Model Options](#model-options)
   * [Outflow Testing Options](#outflow-testing-options)
   * [Plotting & Output Options](#plotting---output-options)
@@ -35,22 +35,28 @@ If you use BADASS for any of your fits, I'd be interested to know what you're do
 - [Credits](#credits)
 - [License](#license)
 
+
+
 # Installation
 
 The easiest way to get started is to simply clone the repository. 
 
-As of BADASS v7.3.0, the following packages are required (Python 2.7):
-- `numpy 1.16.6`
-- `scipy 1.2.1`
-- `pandas 0.23.4`
-- `matplotlib 2.2.3`
+As of BADASS v7.6.0, the following packages are required (Python 2.7.17):
 - `astropy 2.0.9`
 - `astroquery 0.3.9`
+- `corner 2.2.1`
 - `emcee 2.2.1`
-- `natsort 5.5.0`
-- `corner 2.2.0`
+- `ipython 5.8.0`
+- `jupyter-client 5.3.4`
+- `matplotlib 2.2.3`
 - `multiprocessing 0.70a1`
+- `natsort 5.5.0`
+- `numpy 1.16.6`
+- `pandas 0.23.4`
 - `psutil 5.6.7`
+- `scipy 1.2.1`
+
+**Note**: because Python 2 will no longer be supported past 2020, version 7.6.0 will be the last version of BADASS for Python 2 and will only receive minor updates for bug fixes.  
 
 The code is run entirely through the Jupyter Notebook interface, and is set up to run on the included SDSS spectrum file in the ".../examples/" folder.  If one wants to fit multiple spectra consecutively, simply add folders for each spectrum to the folder.  This is the recommended directory structure:
 
@@ -70,6 +76,7 @@ spec_loc = natsort.natsorted( glob.glob(spec_dir+'*') )
 ################################################################################
 ```
 
+
 # Usage
 
 ## Fitting Options
@@ -79,6 +86,7 @@ spec_loc = natsort.natsorted( glob.glob(spec_dir+'*') )
 # Fitting Parameters
 fit_reg       = (4400,5800) # Fitting region; Indo-US Library=(3460,9464)
 good_thresh   = 0.0 # percentage of "good" pixels required in fig_reg for fit.
+interp_bad    = False # interpolate over pixels SDSS flagged as 'bad' (careful!)
 # Outflow Testing Parameters
 test_outflows      = True 
 outflow_test_niter = 10 # number of monte carlo iterations for outflows
@@ -95,14 +103,17 @@ the minimum and maximum desired fitting wavelength in angstroms, for example (44
 **`good_thresh`**: *float [0.0,1.0]*; *Default: 0.0*  
 the cutoff for minimum fraction of "good" pixels (determined by SDSS) within the fitting range to allow for fitting of a given spectrum.  If the spectrum has fewer good pixels than this value, BADASS skips over it and moves onto the next spectrum.
 
+**`interp_bad`**: *bool*; *Default: False*
+Interpolate over pixels which SDSS flagged as bad due to sky line subtraction or cosmic rays.  Warning: if large portions of the fitting region are marked as bad pixels, this can cause BADASS to crash.  One should only use this if only a few pixels are affected by contamination.  
+
 **`test_outflows`**: *bool*; *Default: True*  
 if *False*, BADASS does not test for outflows and instead does whatever you tell it to. If *True*, BADASS performs maximum likelihood fitting of outflows, using monte carlo bootstrap resampling to determine uncertainties, and uses the BADASS prescription for determining the presence of outflows.  Testing for outflows requires the region from 4400 Å - 5800 Å included in the fitting region to accurately account for possible FeII emission.  This region is also required since [OIII] is used to constrain outflow parameters of the H-alpha/[NII]/[SII] outflows.  If all of the BADASS outflow criteria are satisfied, the final model includes outflow components.  The BADASS outflow criteria to justify the inclusion of outflow components are the following:
 
-1. <img src="https://render.githubusercontent.com/render/math?math=(A_%7B%5Crm%7B%5BOIII%5D%2Coutflow%7D%7D-%5Cdelta%20A_%7B%5Crm%7B%5BOIII%5D%2Coutflow%7D%7D)%20%3E%203%5Csigma_%7B%5Crm%7Bnoise%7D%7D"> 
-2. <img src="https://render.githubusercontent.com/render/math?math=(%5Crm%7BFWHM%7D_%7B%5Crm%7B%5BOIII%5D%2Ccore%7D%7D%2B%5Cdelta%20%5Crm%7BFWHM%7D_%7B%5Crm%7B%5BOIII%5D%2Ccore%7D%7D)%20%3C%20(%5Crm%7BFWHM%7D_%7B%5Crm%7B%5BOIII%5D%2Coutflow%7D%7D-%5Cdelta%20%5Crm%7BFWHM%7D_%7B%5Crm%7B%5BOIII%5D%2Coutflow%7D%7D)">
-3. <img src="https://render.githubusercontent.com/render/math?math=(v_%7B%5Crm%7B%5BOIII%5D%2Ccore%7D%7D-%5Cdelta%20v_%7B%5Crm%7B%5BOIII%5D%2Ccore%7D%7D)%20%3E%20(v_%7B%5Crm%7B%5BOIII%5D%2Coutflow%7D%7D%2B%5Cdelta%20v_%7B%5Crm%7B%5BOIII%5D%2Coutflow%7D%7D)">
-4. Significant improvement in residuals between the single-component and double-component models at [OIII]5007
-5. Fit parameters within allowed limits.
+1. Amplitude metric: ![\cfrac{A_{\rm{outflow}}}{\left(\sigma^2_{\rm{noise}} + \delta A^2_{\rm{outflow}}\right)^{1/2}} > 3.0](https://render.githubusercontent.com/render/math?math=%5Ccfrac%7BA_%7B%5Crm%7Boutflow%7D%7D%7D%7B%5Cleft(%5Csigma%5E2_%7B%5Crm%7Bnoise%7D%7D%20%2B%20%5Cdelta%20A%5E2_%7B%5Crm%7Boutflow%7D%7D%5Cright)%5E%7B1%2F2%7D%7D%20%3E%203.0)
+2. Width metric: ![\cfrac{\sigma_{\rm{outflow}}- \sigma_{\rm{core}}}{\left(\delta \sigma^2_{\rm{outflow}}+\delta \sigma^2_{\rm{core}}\right)^{1/2}} > 1.0](https://render.githubusercontent.com/render/math?math=%5Ccfrac%7B%5Csigma_%7B%5Crm%7Boutflow%7D%7D-%20%5Csigma_%7B%5Crm%7Bcore%7D%7D%7D%7B%5Cleft(%5Cdelta%20%5Csigma%5E2_%7B%5Crm%7Boutflow%7D%7D%2B%5Cdelta%20%5Csigma%5E2_%7B%5Crm%7Bcore%7D%7D%5Cright)%5E%7B1%2F2%7D%7D%20%3E%201.0)
+3. Velocity offset metric: ![\cfrac{v_{\rm{core}}- v_{\rm{outflow}}}{\left(\delta v^2_{\rm{core}}+\delta v^2_{\rm{outflow}}\right)^{1/2}} > 1.0](https://render.githubusercontent.com/render/math?math=%5Ccfrac%7Bv_%7B%5Crm%7Bcore%7D%7D-%20v_%7B%5Crm%7Boutflow%7D%7D%7D%7B%5Cleft(%5Cdelta%20v%5E2_%7B%5Crm%7Bcore%7D%7D%2B%5Cdelta%20v%5E2_%7B%5Crm%7Boutflow%7D%7D%5Cright)%5E%7B1%2F2%7D%7D%20%3E%201.0)
+4. Residual Improvement (ratio-of-variances or "f-test"): ![\cfrac{\rm{Var}^2_{\rm{no\;outflow}}}{\rm{Var}^2_{\rm{outflow}}} > 2.0](https://render.githubusercontent.com/render/math?math=%5Ccfrac%7B%5Crm%7BVar%7D%5E2_%7B%5Crm%7Bno%5C%3Boutflow%7D%7D%7D%7B%5Crm%7BVar%7D%5E2_%7B%5Crm%7Boutflow%7D%7D%7D%20%3E%202.0)
+5. Bounds metric: parameters are within their allowed parameter limits.
 
 **`outflow_test_niter`**: *int*; *Default: 10*  
 the number of monte carlo bootstrap simulations for outflow testing.  If set to 0, BADASS will not test for outflows.
@@ -113,7 +124,7 @@ Maximum likelihood fitting of the region defined by `fit_reg`, which can be larg
 **`min_sn_losvd`**: *int*; *Default: 10*  
 minimum S/N threshold for fitting the LOSVD.  Below this threshold, BADASS does not perform template fitting with pPXF and instead uses a 5.0 Gyr SSP galaxy template as a stand-in for the stellar continuum.
 
-## MCMC & Autocorrelation/Convergence Options
+# MCMC & Autocorrelation/Convergence Options
 
 ```python
 ######################### MCMC algorithm parameters ############################
@@ -226,10 +237,10 @@ Examples of the aforementioned spectral components can be seen in the example fi
 # Bounds. test: if paramters of fit reach bounds by N-sigma, 
 #               consider it a bad fit.
 outflow_test_pars={
-'amp_test':{'test':True,'nsigma':1.0}, # Amplitude-over-noise by n-sigma
+'amp_test':{'test':True,'nsigma':3.0}, # Amplitude-over-noise by n-sigma
 'fwhm_test':{'test':True,'nsigma':1.0}, # FWHM difference by n-sigma
 'voff_test':{'test':False,'nsigma':1.0}, # blueshift voff from core by n-sigma
-'resid_test':{'test':True,'nsigma':1.0}, # residual difference by n-sigma
+'resid_test':{'test':True,'nsigma':2.0}, # residual difference by n-sigma
 'bounds_test':{'test':True,'nsigma':1.0} # within bounds by n-sigma
 }
 ################################################################################
@@ -306,6 +317,7 @@ All of the above options are fed into the `run_BADASS()` function as such:
     badass.run_BADASS(file,run_dir,temp_dir,
                       fit_reg=fit_reg, 
                       good_thresh=good_thresh,
+                      interp_bad=interp_bad,
                       test_outflows=test_outflows, 
                       outflow_test_niter=outflow_test_niter,
                       max_like_niter=max_like_niter, 
@@ -340,6 +352,7 @@ All of the above options are fed into the `run_BADASS()` function as such:
                       write_chain=write_chain,
                       threads=threads)
 ```
+
 
 # Output
 
@@ -461,17 +474,18 @@ tol = autocorr_dict.item().get('na_oiii5007_core_voff').get('tol')
 
 ```
 
+
 # Contributing
 
 Please let us know if you wish to contribute to this project by reporting any bugs, issuing pull requests, or requesting any additional features to help make BADASS the most detailed spectroscopic analysis tool in astronomy.
 
+
 # Credits
 
-#### [Remington Oliver Sexton](https://astro.ucr.edu/members/graduate-students/#Remington) (UC Riverside, Physics & Astronomy)
+- [Remington Oliver Sexton](https://astro.ucr.edu/members/graduate-students/#Remington) (UC Riverside, Physics & Astronomy)
+- William Matzko (George Mason University, Physics and Astronomy)
+- Nicholas Darden (UC Riverside, Physics & Astronomy)
 
-#### William Matzko (George Mason University, Physics and Astronomy)
-
-#### Nicholas Darden (UC Riverside, Physics & Astronomy)
 
 # License
 
@@ -496,4 +510,5 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
 
