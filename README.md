@@ -32,7 +32,7 @@ If you use BADASS for any of your fits, I'd be interested to know what you're do
   * [Best-fit Model Components](#best-fit-model-components)
   * [Best-fit Parameters & Uncertainties](#best-fit-parameters---uncertainties)
   * [Autocorrelation Time & Tolerance History](#autocorrelation-time---tolerance-history)
-- [How to...](#How-to...)
+- [How to...](#how-to)
 - [Contributing](#contributing)
 - [Credits](#credits)
 - [License](#license)
