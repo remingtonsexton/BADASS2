@@ -475,7 +475,8 @@ tau = autocorr_dict.item().get('na_oiii5007_core_voff').get('tau')
 tol = autocorr_dict.item().get('na_oiii5007_core_voff').get('tol')
 
 ```
-# How to...
+
+# How to
 ## How to add an emission line to BADASS
 
 This may look complicated, but its really just a lot of copy, pasting, and changing a few variable names.  
