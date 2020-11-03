@@ -1,5 +1,7 @@
 ![](https://github.com/remingtonsexton/BADASS2/blob/master/figures/BADASS_logo.gif)
 
+# Note: Support for BADASS for Python 2 has ended with Version 7.7.4, and will not receive any further updates.  Please migrate to Python 3 and use BADASS3. 
+
 Ridiculous acronyms are a long-running joke in astronomy, but here, spectral fitting ain't no joke!
 
 BADASS is an open-source spectral analysis tool designed for detailed decomposition of Sloan Digital Sky Survey (SDSS) spectra, and specifically designed for the fitting of Type 1 ("broad line") Active Galactic Nuclei (AGN) in the optical.  The fitting process utilizes the Bayesian affine-invariant Markov-Chain Monte Carlo sampler [emcee](https://ui.adsabs.harvard.edu/abs/2013PASP..125..306F/abstract) for robust parameter and uncertainty estimation, as well as autocorrelation analysis to access parameter chain convergence.  BADASS can fit the following spectral features:
